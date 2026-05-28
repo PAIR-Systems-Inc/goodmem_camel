@@ -1,0 +1,76 @@
+name: Publish to PyPI
+
+# Builds the sdist + wheel on every push and PR, and publishes to PyPI when
+# a `v*` git tag is pushed. Authentication uses PyPI Trusted Publishing
+# (OpenID Connect). No API token is stored as a GitHub secret.
+#
+# One-time setup on PyPI:
+#   1. Create the project (or claim the name) on https://pypi.org.
+#   2. Open the project settings -> Publishing -> "Add a new pending publisher".
+#      Owner:       <your-github-org-or-user>
+#      Repository:  goodmem_camel
+#      Workflow:    publish.yml
+#      Environment: pypi
+#
+# Release procedure:
+#   1. Bump `version = "..."` in pyproject.toml.
+#   2. Commit and tag, e.g. `git tag v0.1.0 && git push --tags`.
+#   3. This workflow runs the `publish` job against the GitHub environment
+#      `pypi` and uploads the freshly-built artifacts.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build sdist + wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tooling
+        run: python -m pip install --upgrade pip build twine
+
+      - name: Build distribution
+        run: python -m build
+
+      - name: Verify metadata
+        run: python -m twine check dist/*
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/camel-goodmem/
+    permissions:
+      id-token: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish via Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@release/v1
