@@ -23,6 +23,12 @@ classifiers = [
 dependencies = [
     "camel-ai>=0.2.0",
     "goodmem>=0.1.35",
+    # camel-ai's BaseToolkit does `from mcp.server import FastMCP`, which mcp
+    # 2.x moved. camel-ai only requires `mcp>=1.3.0`, so a fresh install
+    # resolves mcp 2.x and the package cannot be imported at all -- which is
+    # what `pip install camel-goodmem==0.1.0` does today. Pinned until
+    # camel-ai supports mcp 2.x.
+    "mcp<2",
 ]
 
 [project.optional-dependencies]
