@@ -1,138 +1,231 @@
 # camel-goodmem
 
-[GoodMem](https://goodmem.ai) integration for
-[CAMEL](https://github.com/camel-ai/camel).
+[GoodMem](https://docs.goodmem.ai) memory for [CAMEL](https://github.com/camel-ai/camel)
+agents. Documents are chunked, embedded and searched server-side; this package
+wraps the official `goodmem` Python SDK and exposes it to CAMEL both as a
+toolkit and as a `BaseRetriever`.
 
-GoodMem gives AI agents retrieval-augmented generation (RAG) memory. Store
-documents in a space and GoodMem chunks, embeds, and indexes them so your
-agent can pull back the most relevant passages on any question.
+**Version 0.2.0.** Verified against GoodMem server **v1.0.320**.
 
-This package exposes the GoodMem API as a CAMEL `BaseToolkit`. Drop
-`GoodMemToolkit` into a `ChatAgent` and the agent can store, list, and
-retrieve memories alongside its other tools.
+> **Upgrading from 0.1.0.** 0.1.0 talked to GoodMem over hand-written HTTP and
+> had defects that were invisible from its return values — a failed search
+> reported `success: true` with no indication anything had gone wrong, and
+> `publicRead` was sent on space updates although the server had removed the
+> field and answers `400`. See [Changes in 0.2.0](#changes-in-020).
 
-## Installation
+## Install
 
 ```bash
 pip install camel-goodmem
 ```
 
-For local development:
-
 ```bash
-pip install -e ".[dev]"
+export GOODMEM_API_KEY="gm_your_key_here"
+export GOODMEM_BASE_URL="https://your-goodmem-server"
 ```
 
-## Quickstart
+## Use
 
 ```python
-import os
-
-os.environ["GOODMEM_BASE_URL"] = "https://localhost:8080"
-os.environ["GOODMEM_API_KEY"] = "gm_xxxxxxxxxxxxxxxxxxxxxxxx"
-os.environ["GOODMEM_VERIFY_SSL"] = "false"  # self-signed local server
-
 from camel.agents import ChatAgent
-from camel.models import ModelFactory
-from camel.types import ModelPlatformType, ModelType
-
 from camel_goodmem import GoodMemToolkit
 
-toolkit = GoodMemToolkit(verify_ssl=False)
+toolkit = GoodMemToolkit(space_ids=["<space-uuid>"])
+agent = ChatAgent("You remember things.", tools=toolkit.get_tools())
+```
 
-embedder_id = toolkit.goodmem_list_embedders()[0]["embedderId"]
-space_id = toolkit.goodmem_create_space(
-    name="quickstart", embedder_id=embedder_id
-)["spaceId"]
+By default the model sees exactly two tools:
 
-agent = ChatAgent(
-    system_message=(
-        f"You are an assistant whose long-term memory lives in GoodMem "
-        f"space '{space_id}'. Store facts the user shares, and answer "
-        "their questions from that space."
-    ),
-    model=ModelFactory.create(
-        model_platform=ModelPlatformType.DEFAULT,
-        model_type=ModelType.DEFAULT,
-    ),
-    tools=toolkit.get_tools(),
+| Tool | What the model may pass |
+| --- | --- |
+| `goodmem_search` | `query`, `top_k` |
+| `goodmem_remember` | `text`, `metadata` |
+
+Every operational setting — which spaces are readable, which reranker, whether
+a threshold applies, whether files can be uploaded — is fixed by you at
+construction time. The model cannot widen its own access, pick another space,
+or turn on indexing waits.
+
+Opt in to more:
+
+| Constructor argument | Adds |
+| --- | --- |
+| `upload_dir=<path>` | `goodmem_upload_file`, confined to that directory |
+| `allow_admin_tools=True` | `list_spaces`, `list_embedders`, `goodmem_get_space`, `create_space`, `update_space`, `list_memories`, `get_memory` |
+| `allow_delete=True` | `delete_memory`, `delete_space` |
+| `allow_write=False` | removes `goodmem_remember` |
+
+## Retrieval results
+
+```python
+{
+  "success": True,
+  "query": "...",
+  "results": [
+    {
+      "chunkId": "...", "text": "...", "memoryId": "...", "spaceId": "...",
+      "score": 0.64,          # higher is better
+      "rawScore": -0.64,      # exactly what the server sent
+      "scoreKind": "vector",  # or "reranker" -- not the same scale
+      "contentType": "text/plain",
+      "metadata": {...},      # the memory's metadata, joined by UUID
+    }
+  ],
+  "totalResults": 1,
+  "partial": False,           # True when the server reported a problem
+  "statuses": [],             # what it reported
+  "resultSetId": "...",
+}
+```
+
+`partial` means exactly one thing: **the server reported a real problem during
+this retrieval.** It is independent of whether hits came back. A degraded
+search still returns whatever hits arrived, with `partial` set; when nothing
+usable arrives the result is empty, `partial` is set, and a `warning` key plus
+a WARNING log line carry the server's own reason. A failed search is never
+presented as an empty one.
+
+### Scores
+
+GoodMem produces two kinds of score, and they are not comparable:
+
+- **vector** scores are negative distances. `score` is the flipped value so
+  higher is better, with `rawScore` kept beside it.
+- **reranker** scores are already higher-is-better, on a **provider-dependent**
+  scale. Measured live on the same five documents: Voyage `rerank-2.5` returned
+  `0.27..0.93`, Jina `jina-reranker-v3` returned `-0.14..0.43`.
+
+So there is **no default threshold**, and `min_score` applies only when
+`reranker_id` is set. If a threshold removes everything, the toolkit warns and
+names the range it actually saw rather than returning a silent empty list.
+
+## Metadata filters
+
+Filters are expressions evaluated server-side, not SQL. Build them with the
+`filters` helper — in 0.1.0 the filter was a raw string the *model* supplied,
+which let it widen its own scope and broke on any value containing an
+apostrophe:
+
+```python
+from camel_goodmem import GoodMemToolkit, filters
+
+toolkit = GoodMemToolkit(
+    space_ids=["..."],
+    metadata_filter={"tenant": "acme", "active": True},
+)
+
+expression = filters.all_of(
+    filters.equals("tenant", "acme"),
+    filters.compare("year", ">=", 2026),
+    filters.one_of("kind", ["note", "doc"]),
 )
 ```
 
-Each tool returns either a Python list or a `dict` with operation-specific
-fields. Errors raise the underlying `requests` exception so the agent can
-see and recover from them.
+The helper applies the escaping the server accepts (`'` → `\'`, `\` → `\\`;
+SQL-style `''` doubling is rejected with HTTP 400), refuses control characters,
+restricts field names, and casts each value to the type GoodMem stored. A
+boolean compared as `TEXT` is accepted with HTTP 200 and matches nothing, so
+`filters` never stringifies a bool.
 
-## Available operations
+## Uploads
 
-| Method | Description |
-|---|---|
-| `goodmem_list_embedders` | List embedder models available on the server |
-| `goodmem_list_spaces` | List all spaces accessible to the API key |
-| `goodmem_get_space` | Fetch a space by ID |
-| `goodmem_create_space` | Create a space (idempotent by name) |
-| `goodmem_update_space` | Update a space's name, labels, or public-read flag |
-| `goodmem_delete_space` | Delete a space and all of its memories |
-| `goodmem_create_memory` | Store text or a file as a memory |
-| `goodmem_list_memories` | List memories in a space, with pagination and filters |
-| `goodmem_retrieve_memories` | Semantic retrieval across one or more spaces |
-| `goodmem_get_memory` | Fetch a memory by ID, with optional content |
-| `goodmem_delete_memory` | Delete a memory |
+Uploads are **off** unless you set `upload_dir`. When set, every path is
+resolved — symlinks included — and refused if it lands outside that directory,
+so a model-supplied path cannot read arbitrary files from the host.
 
-### Retrieval options
+```python
+toolkit = GoodMemToolkit(space_ids=["..."], upload_dir="/srv/agent-uploads")
+```
 
-`goodmem_retrieve_memories` accepts the following parameters in addition to
-`query`, `space_ids`, and `max_results`:
+## Retriever
 
-| Parameter | Type | Description |
-|---|---|---|
-| `metadata_filter` | str | SQL-style JSONPath filter applied server-side to every space key. Example: `CAST(val('$.category') AS TEXT) = 'feat'` |
-| `wait_for_indexing` | bool | Poll for results when none come back on the first call (default `True`) |
-| `max_wait_seconds` | float | Polling budget (default `10`) |
-| `poll_interval` | float | Seconds between polls (default `2`) |
-| `reranker_id` | str | Reranker model to refine result ordering |
-| `llm_id` | str | LLM that generates a contextual abstract reply |
-| `relevance_threshold` | float | Minimum score (0-1) for inclusion |
-| `llm_temperature` | float | Creativity (0-2) for the LLM post-processor |
-| `chronological_resort` | bool | Reorder results by creation time |
+```python
+from camel_goodmem import GoodMemRetriever, GoodMemToolkit
 
-## Environment variables
+retriever = GoodMemRetriever(GoodMemToolkit(space_ids=["..."]))
+retriever.process("Text to remember.")
+rows = retriever.query("what did I store?", top_k=5)
+```
 
-| Variable | Description |
-|---|---|
-| `GOODMEM_BASE_URL` | Base URL of the GoodMem API server |
-| `GOODMEM_API_KEY` | API key sent as `X-API-Key` |
-| `GOODMEM_VERIFY_SSL` | Set to `false` to skip TLS verification (default `true`) |
+`query()` returns CAMEL's retriever shape — `similarity score`, `content path`,
+`metadata`, `extra_info`, `text` — with GoodMem specifics under `extra_info`
+(`goodmem_chunk_id`, `goodmem_memory_id`, `goodmem_space_id`,
+`goodmem_score_kind`, `goodmem_raw_score`, `goodmem_partial`, and
+`goodmem_statuses` when degraded).
 
-When the env vars are set, the toolkit constructor can be called with no
-arguments.
+## Bringing your own client
 
-### Trusting the dev cert on localhost
+```python
+from goodmem import Goodmem
+from camel_goodmem import GoodMemToolkit
 
-GoodMem's local dev server ships with TLS on, using a self-signed
-certificate. Two ways to handle that during development:
+toolkit = GoodMemToolkit(client=Goodmem(base_url=..., api_key=...))
+```
 
-1. Pass `verify_ssl=False` to `GoodMemToolkit(...)`. The toolkit suppresses
-   the matching urllib3 `InsecureRequestWarning` so your console stays clean.
-2. Set `GOODMEM_VERIFY_SSL=false` in your environment.
+An injected client keeps its own server, credentials and TLS settings, and is
+never closed by the toolkit.
 
-For production, install the GoodMem CA certificate into your trust store
-and leave `verify_ssl=True`.
+## Changes in 0.2.0
 
-## End-to-end example
+Every item below was reproduced against the published 0.1.0 wheel, live
+against GoodMem v1.0.320.
 
-[`examples/example_usage.py`](examples/example_usage.py) drives the toolkit
-through four `ChatAgent` scenarios: persistent project context across
-`agent.reset()`, a scribe-and-analyst team pipeline, metadata-driven
-retrieval with a server-side filter, and tool-call inspection of the
-analyst's response. The answering step uses OpenAI; install with
-`pip install camel-goodmem[examples]` and set `OPENAI_API_KEY` before
-running.
+| Was | Now |
+| --- | --- |
+| Hand-written `requests` client | Official `goodmem` SDK |
+| A search with a broken reranker returned `success: true` and no status; the server had sent three | `partial` + `statuses`, and the hits are still returned |
+| `publicRead` sent on space update — live `400 Unrecognized field "publicRead"` | Not offered; the SDK's own request model has no such field |
+| `metadata_filter` was a raw string from the model, so it could widen its own scope; an apostrophe in a value was a `400` | Developer-set `metadata_filter`, built and escaped by `filters` |
+| `file_path` was a model argument with no restriction; it read `/etc/hostname` and uploaded it | Confined to `upload_dir`; absolute, `..` and symlink escapes refused |
+| Empty search took **11.6 s** — `wait_for_indexing` defaulted on and was model-controllable | **0.33 s**; the read path never polls |
+| 13 retrieval arguments; `delete_space` and `update_space` always in the toolset | `goodmem_search(query, top_k)`; admin and destructive tools opt-in |
+| A PDF's content came back as raw `bytes`, which no tool result can carry | Text as text, anything else base64 — always JSON-serialisable |
+| A failed content fetch set `contentError` and left `success: true` | A failure raises |
+| Chunks and memories were two arrays joined by position | Joined by UUID, de-duplicated by chunk id |
+| Threshold documented "(0-1)"; raw negative scores | `score`/`rawScore`/`scoreKind`, reranker-only threshold that warns |
+| `list_spaces` returned the first page; the server's `nextToken` was never read | Paginated, bounded by `max_list_items` |
+| `400 Client Error: Bad Request` | The server's own message and status on `GoodMemError` |
+| Reusing a space name silently accepted a different embedder | Reuse requires a matching embedder; a mismatch names both |
+| No request carried a timeout (0 of 12) | On the client, configurable |
+| No retriever — GoodMem could not be used with CAMEL's RAG paths | `GoodMemRetriever(BaseRetriever)` |
+| 71 tests that mocked the HTTP session wholesale; no CI | 69 offline + 29 live; CI on 3.10–3.13 |
+
+## Tests
+
+| Suite | Count | Needs |
+| --- | --- | --- |
+| `tests/test_goodmem_toolkit.py` | 69 | nothing — the real SDK over a mock transport, fed NDJSON captured from a live server |
+| `tests/test_goodmem_live.py` | 29 | `GOODMEM_API_KEY` + `GOODMEM_BASE_URL`; skips entirely without them |
 
 ```bash
-python examples/example_usage.py
+pip install -e ".[dev]"
+
+# offline
+pytest tests/test_goodmem_toolkit.py
+
+# live (pin the embedder if the server's first one is unhealthy)
+GOODMEM_API_KEY=... GOODMEM_BASE_URL=... \
+  GOODMEM_TEST_EMBEDDER_ID=... \
+  pytest tests/test_goodmem_live.py
+
+# what CI runs
+ruff check camel_goodmem tests
+ruff format --check camel_goodmem tests
+mypy camel_goodmem
 ```
+
+The live suite creates one space per run and asserts, against a fresh server
+inventory, that it is gone afterwards.
+
+## Deliberately not done
+
+- **No `AgentMemory` implementation.** CAMEL's `AgentMemory` is chat history
+  with a context-window policy; GoodMem is a document store with server-side
+  embedding. Implementing it would fake one side of the contract.
+- **Turning off TLS verification** is possible via `verify_ssl` for
+  self-signed development servers. It defaults to on, no example here turns it
+  off, and CI fails if shipped Python does.
 
 ## License
 
-Apache License 2.0. See [LICENSE](LICENSE).
+Apache-2.0.

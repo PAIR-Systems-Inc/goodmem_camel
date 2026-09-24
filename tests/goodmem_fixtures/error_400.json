@@ -1,0 +1,1 @@
+{"errors":[{"field":"spaceEmbedders[0].embedderId","message":"Invalid embedder ID format"},{"field":"defaultChunkingConfig","message":"Default chunking config is required"}]}
