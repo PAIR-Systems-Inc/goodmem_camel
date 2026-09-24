@@ -1,0 +1,97 @@
+# Tests, lint and the gates. The publish workflow can ship a release without
+# any of this having run, which is how 0.1.0 shipped with 71 green tests that
+# mocked the HTTP session wholesale -- so this runs on every push and PR.
+
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Lint
+        run: |
+          set -euo pipefail
+          ruff check camel_goodmem tests
+          ruff format --check camel_goodmem tests
+
+      - name: Types
+        run: mypy camel_goodmem
+
+      - name: Offline suite
+        run: pytest tests/test_goodmem_toolkit.py -v
+
+      - name: Live tests must skip without credentials
+        env:
+          GOODMEM_API_KEY: ""
+          GOODMEM_BASE_URL: ""
+        run: |
+          set -euo pipefail
+          pytest tests/test_goodmem_live.py -v > live.log 2>&1
+          grep -q "skipped" live.log
+          if grep -qE "^tests.*(PASSED|FAILED)" live.log; then
+            echo "A live test ran without credentials -- a key may be baked in."
+            exit 1
+          fi
+
+      - name: Package builds and imports in a clean environment
+        run: |
+          set -euo pipefail
+          pip install build
+          python -m build
+          python -m venv /tmp/clean
+          /tmp/clean/bin/pip install --quiet dist/*.whl
+          /tmp/clean/bin/python -c "import camel_goodmem; print(camel_goodmem.__version__)"
+
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: No GoodMem API key in any tracked file
+        run: |
+          set -euo pipefail
+          if git ls-files -z | xargs -0 grep -IEn "gm_[a-z0-9]{20,}" ; then
+            echo "A GoodMem API key is committed to this repository."
+            exit 1
+          fi
+          echo "No credential-shaped string in any tracked file."
+
+      - name: TLS verification is not disabled in shipped Python
+        run: |
+          set -euo pipefail
+          if find camel_goodmem -name '*.py' \
+               -exec grep -In "verify_ssl=False" {} + ; then
+            echo "TLS verification is disabled in shipped Python."
+            exit 1
+          fi
+          echo "No disabled TLS in shipped Python."
+
+# publicRead is checked by tests/test_goodmem_toolkit.py, which strips
+# docstrings via ast before looking -- a grep cannot tell a field being sent
+# from a sentence explaining why it no longer is.

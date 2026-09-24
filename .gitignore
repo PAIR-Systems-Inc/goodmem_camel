@@ -13,3 +13,13 @@ htmlcov/
 .mypy_cache/
 .ruff_cache/
 .DS_Store
+
+# Local agent/editor settings, which may hold credentials
+.claude/settings.local.json
+
+# Build and env
+dist/
+build/
+*.egg-info/
+.venv/
+__pycache__/

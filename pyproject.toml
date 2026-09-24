@@ -4,7 +4,7 @@ description = "GoodMem integration for CAMEL."
 authors = [{ name = "PAIR Systems" }]
 readme = "README.md"
 requires-python = ">=3.10"
-version = "0.1.0"
+version = "0.2.0"
 license-files = ["LICENSE"]
 urls.homepage = "https://github.com/PAIR-Systems-Inc/goodmem_camel"
 urls.source = "https://github.com/PAIR-Systems-Inc/goodmem_camel"
@@ -22,13 +22,16 @@ classifiers = [
 ]
 dependencies = [
     "camel-ai>=0.2.0",
-    "requests>=2.28",
+    "goodmem>=0.1.35",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",
     "pytest-timeout",
+    "httpx",
+    "ruff==0.7.4",
+    "mypy",
     "build",
     "twine",
 ]
@@ -47,3 +50,14 @@ markers = [
 [build-system]
 requires = ["flit-core >= 3.11,<4.0"]
 build-backend = "flit_core.buildapi"
+
+[tool.ruff]
+line-length = 79
+target-version = "py310"
+
+[tool.ruff.lint]
+extend-select = ["I", "B", "C4", "RUF", "E"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
