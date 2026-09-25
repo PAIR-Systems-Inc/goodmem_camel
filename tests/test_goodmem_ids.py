@@ -12,6 +12,7 @@ entry point that takes an id, each malformed id must be refused with an error
 naming the field, and the server must have recorded nothing at all.
 """
 
+import ast
 import asyncio
 import json
 import re
@@ -24,7 +25,14 @@ from typing import Any
 
 import pytest
 
-from camel_goodmem import GoodMemRetriever, GoodMemToolkit
+from camel_goodmem import (
+    UUID_PATTERN,
+    GoodMemIdError,
+    GoodMemRetriever,
+    GoodMemToolkit,
+)
+from camel_goodmem._ids import require_uuid
+from tests import test_goodmem_live as live
 
 FIXTURES = Path(__file__).parent / "goodmem_fixtures"
 KEY = "gm_offline_test_key"
@@ -70,13 +78,27 @@ def _space_json() -> bytes:
     ).encode()
 
 
-def _answer(method: str, path: str) -> tuple[int, str, bytes]:
+def _answer(method: str, path: str, body: bytes) -> tuple[int, str, bytes]:
     r"""Answers like GoodMem would, so a request that gets through succeeds.
 
     Every DELETE succeeds, which is exactly what made the traversal
-    dangerous: the caller was told the memory was deleted.
+    dangerous: the caller was told the memory was deleted. Creating a space
+    with an embedder the server does not have is refused -- the SDK
+    documents that every referenced embedder must exist -- and the live
+    suite relies on that. The live server's status for it was not captured,
+    so 404 is a stand-in; the live test accepts any 4xx.
     """
     as_json = "application/json"
+    if method == "POST" and path == "/v1/spaces":
+        embedders = json.loads(body or b"{}").get("spaceEmbedders") or []
+        unknown = [
+            e.get("embedderId")
+            for e in embedders
+            if e.get("embedderId") != EMBEDDER
+        ]
+        if unknown:
+            reason = {"message": f"Embedder not found: {unknown[0]}"}
+            return 404, as_json, json.dumps(reason).encode()
     if method == "DELETE":
         return 204, as_json, b""
     if path == "/v1/memories:retrieve":
@@ -120,7 +142,7 @@ class _Recorder(BaseHTTPRequestHandler):
             {"method": self.command, "target": self.path, "body": body}
         )
         status, content_type, payload = _answer(
-            self.command, self.path.split("?", 1)[0]
+            self.command, self.path.split("?", 1)[0], body
         )
         self.send_response(status)
         self.send_header("Content-Type", content_type)
@@ -192,8 +214,6 @@ def _assert_refused(server, call: Callable[[], Any], field: str) -> None:
         f"the call returned {outcome!r} and raised {error!r}"
     )
     assert error is not None, f"accepted a malformed {field}: {outcome!r}"
-
-    from camel_goodmem import GoodMemIdError
 
     # A FunctionTool re-raises as a plain ValueError; ours is the context.
     root = error if isinstance(error, GoodMemIdError) else error.__context__
@@ -452,8 +472,6 @@ def test_body_ids_are_sent_canonical(server):
 
 
 def test_every_model_visible_id_is_declared_a_uuid(server):
-    from camel_goodmem import UUID_PATTERN
-
     tools = _toolkit(server).get_tools()
     declared = {}
     for tool in tools:
@@ -476,8 +494,6 @@ def test_every_model_visible_id_is_declared_a_uuid(server):
 
 class TestRequireUuid:
     def test_canonical_ids_are_normalised_to_lower_case(self):
-        from camel_goodmem._ids import require_uuid
-
         assert require_uuid(MEMORY, "memory_id") == MEMORY
         assert require_uuid(MEMORY.upper(), "memory_id") == MEMORY
         assert require_uuid(uuid.UUID(MEMORY), "memory_id") == MEMORY
@@ -498,14 +514,310 @@ class TestRequireUuid:
         ],
     )
     def test_anything_else_is_refused_naming_the_field(self, value):
-        from camel_goodmem import GoodMemIdError
-        from camel_goodmem._ids import require_uuid
-
         with pytest.raises(GoodMemIdError, match=r"space_id must be a UUID"):
             require_uuid(value, "space_id")
 
     def test_the_error_is_a_value_error_like_the_other_input_errors(self):
-        from camel_goodmem import GoodMemIdError, GoodMemUploadError
+        from camel_goodmem import GoodMemUploadError
 
         assert issubclass(GoodMemIdError, ValueError)
         assert issubclass(GoodMemUploadError, ValueError)
+
+
+# ---------------------------------------------------------------------------
+# The id sent is the text that was checked, not the caller's object
+# ---------------------------------------------------------------------------
+
+_SWAP = f"../spaces/{VICTIM}"
+
+
+class _SwappingStr(str):
+    r"""Holds a real UUID, then turns into a traversal once it is used.
+
+    ``lower()`` is what the validator used to return, and ``__format__`` is
+    what the SDK's ``f"/v1/memories/{id}"`` calls.
+    """
+
+    def lower(self) -> str:
+        return _SWAP
+
+    def __str__(self) -> str:
+        return _SWAP
+
+    def __format__(self, spec: str) -> str:
+        return _SWAP
+
+
+class _SwappingUuid(uuid.UUID):
+    r"""A UUID whose string form is a traversal."""
+
+    def __str__(self) -> str:
+        return _SWAP
+
+
+def _list_after_setting_space_ids(tk: GoodMemToolkit, value: Any) -> Any:
+    tk.space_ids = [value]
+    return tk.list_memories()
+
+
+#: Each id-in-path entry point, the real UUID the swapping value holds, and
+#: exactly what must reach the server.
+SWAPPABLE: dict[
+    str, tuple[Callable[[GoodMemToolkit, Any], Any], str, list]
+] = {
+    "get_memory+content": (
+        lambda tk, v: tk.get_memory(v, include_content=True),
+        MEMORY,
+        [f"GET /v1/memories/{MEMORY}", f"GET /v1/memories/{MEMORY}/content"],
+    ),
+    "goodmem_get_space": (
+        lambda tk, v: tk.goodmem_get_space(v),
+        HOME,
+        [f"GET /v1/spaces/{HOME}"],
+    ),
+    "update_space": (
+        lambda tk, v: tk.update_space(v, name="renamed"),
+        HOME,
+        [f"PUT /v1/spaces/{HOME}"],
+    ),
+    "delete_space": (
+        lambda tk, v: tk.delete_space(v),
+        HOME,
+        [f"DELETE /v1/spaces/{HOME}"],
+    ),
+    "list_memories": (
+        lambda tk, v: tk.list_memories(v),
+        HOME,
+        [f"GET /v1/spaces/{HOME}/memories"],
+    ),
+    "list_memories() with space_ids set later": (
+        _list_after_setting_space_ids,
+        HOME,
+        [f"GET /v1/spaces/{HOME}/memories"],
+    ),
+    "delete_memory": (
+        lambda tk, v: tk.delete_memory(v),
+        MEMORY,
+        [f"DELETE /v1/memories/{MEMORY}"],
+    ),
+}
+
+
+@pytest.mark.parametrize("entry", SWAPPABLE.keys())
+def test_a_str_subclass_cannot_swap_the_id_after_the_check(server, entry):
+    call, real, expected = SWAPPABLE[entry]
+    call(_toolkit(server), _SwappingStr(real.upper()))
+    assert _paths(server) == expected
+
+
+@pytest.mark.parametrize("entry", SWAPPABLE.keys())
+def test_a_uuid_subclass_whose_text_is_not_a_uuid_is_refused(server, entry):
+    call, real, _expected = SWAPPABLE[entry]
+    field = (
+        "space_ids" if "space_ids" in entry else DIRECT[entry.split()[0]][0]
+    )
+    tk = _toolkit(server)
+    _assert_refused(server, lambda: call(tk, _SwappingUuid(real)), field)
+
+
+def test_a_deleted_memory_is_reported_as_a_plain_str(server):
+    out = _toolkit(server).delete_memory(_SwappingStr(MEMORY))
+    assert type(out["memoryId"]) is str and out["memoryId"] == MEMORY
+
+
+class TestRequireUuidReturnsPlainText:
+    @pytest.mark.parametrize(
+        "value",
+        [
+            MEMORY,
+            MEMORY.upper(),
+            uuid.UUID(MEMORY),
+            _SwappingStr(MEMORY),
+            _SwappingStr(MEMORY.upper()),
+        ],
+        ids=["str", "upper", "uuid.UUID", "str subclass", "upper subclass"],
+    )
+    def test_the_result_is_a_plain_str_of_the_checked_text(self, value):
+        out = require_uuid(value, "memory_id")
+        assert type(out) is str
+        assert out == MEMORY and f"{out}" == MEMORY and out.lower() == MEMORY
+
+    def test_a_uuid_subclass_is_judged_by_the_text_it_produces(self):
+        with pytest.raises(GoodMemIdError, match="memory_id must be a UUID"):
+            require_uuid(_SwappingUuid(MEMORY), "memory_id")
+
+
+# ---------------------------------------------------------------------------
+# reranker_id="" meant "no reranker" in 0.2.0; the refusal says what to do
+# ---------------------------------------------------------------------------
+
+
+def test_an_empty_reranker_id_is_refused_saying_how_to_turn_it_off(server):
+    _assert_refused(
+        server, lambda: _toolkit(server, reranker_id=""), "reranker_id"
+    )
+    with pytest.raises(GoodMemIdError, match=r"pass reranker_id=None"):
+        _toolkit(server, reranker_id="")
+
+
+def test_an_empty_reranker_id_set_later_says_how_to_turn_it_off(server):
+    tk = _toolkit(server)
+    tk.reranker_id = ""
+    with pytest.raises(GoodMemIdError, match=r"pass reranker_id=None"):
+        tk.goodmem_search("q")
+    assert _sent(server) == []
+
+
+def test_no_reranker_is_none_not_an_empty_string(server):
+    _toolkit(server, reranker_id=None).goodmem_search("q")
+    (retrieve,) = server.log
+    assert "rerankerId" not in json.dumps(json.loads(retrieve["body"]))
+
+
+def test_the_readme_calls_out_that_an_empty_reranker_id_is_refused():
+    readme = (Path(__file__).parents[1] / "README.md").read_text("utf-8")
+    changes = readme.split("## Changes in 0.2.1", 1)[1].split("\n## ", 1)[0]
+    assert 'reranker_id=""' in changes and "reranker_id=None" in changes
+
+
+# ---------------------------------------------------------------------------
+# The live suite must not expect the server to see a malformed id
+# ---------------------------------------------------------------------------
+# The live tests skip without credentials, so CI never runs them, and one
+# that hands the toolkit a malformed id -- expecting the *server* to reject
+# it -- fails only on the day someone runs it live. The tests below run the
+# live tests that meet the validator against the recorder, and check the
+# live source for any other such id.
+
+
+def test_the_live_rejected_create_holds_against_a_server(server):
+    spaces = live.TestLiveSpaces()
+    spaces.test_a_rejected_create_carries_the_servers_message(_toolkit(server))
+    assert _paths(server) == ["GET /v1/spaces", "POST /v1/spaces"]
+    create = json.loads(server.log[1]["body"])
+    assert create["spaceEmbedders"][0]["embedderId"] == live.NO_SUCH_EMBEDDER
+
+
+def test_the_live_malformed_embedder_test_holds_against_a_server(server):
+    spaces = live.TestLiveSpaces()
+    spaces.test_a_malformed_embedder_id_is_refused_before_it_is_sent(
+        _toolkit(server)
+    )
+    # Only the listing that checks nothing was created.
+    assert _paths(server) == ["GET /v1/spaces"]
+
+
+#: Where a literal id lands in a toolkit call: the positional index of the
+#: id for each method, and the keyword and attribute names that carry one.
+_ID_POSITION = {
+    "get_memory": 0,
+    "goodmem_get_space": 0,
+    "update_space": 0,
+    "delete_space": 0,
+    "list_memories": 0,
+    "delete_memory": 0,
+    "create_space": 1,
+}
+_ID_NAMES = {"memory_id", "space_id", "embedder_id", "reranker_id", "id"}
+_ID_LISTS = {"space_ids"}
+
+
+def _malformed_live_ids(source: str) -> list[str]:
+    r"""Lists literal ids in ``source`` that the validator would refuse,
+    other than those inside ``pytest.raises(GoodMemIdError)``."""
+    tree = ast.parse(source)
+    constants = {
+        target.id: node.value.value
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and isinstance(node.value, ast.Constant)
+        and isinstance(node.value.value, str)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    }
+
+    def text(node: ast.AST) -> str | None:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.Name):
+            return constants.get(node.id)
+        return None
+
+    def expects_refusal(item: ast.withitem) -> bool:
+        call = item.context_expr
+        return (
+            isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Attribute)
+            and call.func.attr == "raises"
+            and bool(call.args)
+            and ast.unparse(call.args[0]).endswith("GoodMemIdError")
+        )
+
+    refused: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.With, ast.AsyncWith)) and any(
+            expects_refusal(i) for i in node.items
+        ):
+            refused.update(id(n) for stmt in node.body for n in ast.walk(stmt))
+
+    found: list[str] = []
+    for node in ast.walk(tree):
+        ids: list[ast.AST] = []
+        if isinstance(node, ast.Call):
+            method = getattr(node.func, "attr", None)
+            position = _ID_POSITION.get(method or "")
+            if position is not None and len(node.args) > position:
+                ids.append(node.args[position])
+            for kw in node.keywords:
+                if kw.arg in _ID_NAMES:
+                    ids.append(kw.value)
+                elif kw.arg in _ID_LISTS and isinstance(kw.value, ast.List):
+                    ids.extend(kw.value.elts)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                name = getattr(target, "attr", None)
+                if name in _ID_NAMES:
+                    ids.append(node.value)
+                elif name in _ID_LISTS and isinstance(node.value, ast.List):
+                    ids.extend(node.value.elts)
+        for value in ids:
+            literal = text(value)
+            if (
+                literal is not None
+                and not re.fullmatch(UUID_PATTERN, literal)
+                and id(node) not in refused
+            ):
+                line = getattr(node, "lineno", "?")
+                found.append(f"line {line}: {literal!r}")
+    return found
+
+
+def test_no_live_test_expects_the_server_to_see_a_malformed_id():
+    source = Path(live.__file__).read_text("utf-8")
+    assert _malformed_live_ids(source) == []
+
+
+@pytest.mark.parametrize(
+    ("source", "flagged"),
+    [
+        # What 0.2.1's first cut left in the live suite.
+        (
+            "with pytest.raises(GoodMemError):\n"
+            "    admin.create_space('n', 'not-a-uuid')\n",
+            ["line 2: 'not-a-uuid'"],
+        ),
+        ("BAD = 'mem-1'\ntk.delete_memory(BAD)\n", ["line 2: 'mem-1'"]),
+        ("GoodMemToolkit(space_ids=['space-1'])\n", ["line 1: 'space-1'"]),
+        ("GoodMemToolkit(reranker_id='')\n", ["line 1: ''"]),
+        ("tk.reranker_id = 'rr-1'\n", ["line 1: 'rr-1'"]),
+        # Expected to be refused client-side: fine.
+        (
+            "with pytest.raises(GoodMemIdError):\n"
+            "    admin.create_space('n', 'not-a-uuid')\n",
+            [],
+        ),
+        (f"tk.delete_memory({MEMORY!r})\n", []),
+    ],
+)
+def test_the_live_source_check_finds_a_malformed_id(source, flagged):
+    assert _malformed_live_ids(source) == flagged

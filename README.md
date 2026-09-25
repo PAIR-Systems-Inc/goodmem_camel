@@ -66,6 +66,12 @@ otherwise send `DELETE /v1/spaces/<id>` and delete a whole space. Upper-case
 UUIDs are accepted and sent lower-case. The tool schemas declare these
 arguments with the same UUID pattern, so the model is told up front.
 
+An empty string is not a UUID either: for no reranker, pass
+`reranker_id=None` or leave it out. `reranker_id=""` meant "no reranker" in
+0.2.0 and is now refused at construction, so
+`reranker_id=os.getenv("GOODMEM_RERANKER_ID", "")` fails at startup — write
+`os.getenv("GOODMEM_RERANKER_ID") or None`.
+
 ## Retrieval results
 
 ```python
@@ -187,6 +193,7 @@ real SDK and `httpx`:
 | `%2e%2e/…`, `..%2F…`, a leading space, `?x=1` and `#frag` after an id all reached the server; `list_memories("<id>#frag")` requested a different endpoint, `GET /v1/spaces/<id>` | Only a canonical UUID is accepted |
 | `list_memories("")` silently listed the configured space | Refused |
 | A malformed `space_ids` or `reranker_id` was sent as-is, and `list_memories()` put the configured space id in a URL path | Refused at construction, and again at every use |
+| `reranker_id=""` meant "no reranker" | **Refused** with `GoodMemIdError` at construction; the message says to pass `reranker_id=None` |
 
 ## Changes in 0.2.0
 
@@ -218,8 +225,8 @@ against GoodMem v1.0.320.
 | Suite | Count | Needs |
 | --- | --- | --- |
 | `tests/test_goodmem_toolkit.py` | 69 | nothing — the real SDK over a mock transport, fed NDJSON captured from a live server |
-| `tests/test_goodmem_ids.py` | 345 | nothing — the real SDK and `httpx` against a local server that records every request; every id-taking entry point (method, CAMEL tool, MCP tool, configuration) × ten malformed ids must send nothing |
-| `tests/test_goodmem_live.py` | 29 | `GOODMEM_API_KEY` + `GOODMEM_BASE_URL`; skips entirely without them |
+| `tests/test_goodmem_ids.py` | 380 | nothing — the real SDK and `httpx` against a local server that records every request; every id-taking entry point (method, CAMEL tool, MCP tool, configuration) × ten malformed ids must send nothing, and a `str` or `uuid.UUID` subclass cannot change the id after it is checked. It also runs the live tests that depend on the id check against that server, and fails if any other live test passes an id the check would refuse |
+| `tests/test_goodmem_live.py` | 30 | `GOODMEM_API_KEY` + `GOODMEM_BASE_URL`; skips entirely without them |
 
 ```bash
 pip install -e ".[dev]"

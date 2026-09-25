@@ -24,6 +24,13 @@ logger = get_logger(__name__)
 #: cannot walk an entire server.
 DEFAULT_MAX_LIST_ITEMS = 200
 
+#: 0.2.0 read ``reranker_id=""`` as "no reranker", so a caller writing
+#: ``reranker_id=os.getenv("X", "")`` meets this refusal at startup.
+_NO_RERANKER_HINT = (
+    "To search without a reranker, pass reranker_id=None or leave it out; "
+    "an empty string is refused rather than read as 'no reranker'."
+)
+
 
 class GoodMemError(RuntimeError):
     r"""Raised when a GoodMem operation fails.
@@ -95,8 +102,9 @@ class GoodMemToolkit(BaseToolkit):
             uploads are confined to. When ``None``, no upload tool is offered
             and no path is ever read from disk. (default: :obj:`None`)
         reranker_id (Optional[str]): The UUID of a reranker to apply to
-            retrieval. Without one, no relevance threshold is applied.
-            (default: :obj:`None`)
+            retrieval. Without one, no relevance threshold is applied. Pass
+            ``None`` for no reranker: an empty string is a malformed id and
+            is refused. (default: :obj:`None`)
         min_score (Optional[float]): Drop hits scoring below this value.
             Applies only when ``reranker_id`` is set, because reranker scales
             are provider-dependent. Off by default. (default: :obj:`None`)
@@ -158,7 +166,7 @@ class GoodMemToolkit(BaseToolkit):
         ]
         self.verify_ssl = verify_ssl
         self.reranker_id = (
-            require_uuid(reranker_id, "reranker_id")
+            require_uuid(reranker_id, "reranker_id", hint=_NO_RERANKER_HINT)
             if reranker_id is not None
             else None
         )
@@ -257,7 +265,9 @@ class GoodMemToolkit(BaseToolkit):
         r"""Returns the configured reranker as a canonical UUID, if any."""
         if self.reranker_id is None:
             return None
-        return require_uuid(self.reranker_id, "reranker_id")
+        return require_uuid(
+            self.reranker_id, "reranker_id", hint=_NO_RERANKER_HINT
+        )
 
     def _space_keys(self) -> list[dict[str, Any]]:
         r"""Builds the ``spaceKeys`` payload, including any metadata filter."""

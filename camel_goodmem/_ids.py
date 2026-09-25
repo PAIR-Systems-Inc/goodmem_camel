@@ -39,14 +39,23 @@ class GoodMemIdError(ValueError):
     r"""Raised when an id is not a UUID. No request has been made."""
 
 
-def require_uuid(value: Any, field: str) -> str:
+def require_uuid(value: Any, field: str, *, hint: str = "") -> str:
     r"""Returns ``value`` as a lower-case canonical UUID, or refuses it.
+
+    What is returned is always a plain :class:`str` built from the exact
+    text that passed the check. A ``str`` or :class:`uuid.UUID` subclass
+    can override ``lower()``, ``__str__`` or ``__format__`` -- which the
+    SDK's f-string path calls -- so returning the caller's own object, or
+    calling its methods after the check, would let it swap in another path.
 
     Args:
         value (Any): The id as supplied -- by a model, a developer or
             configuration. A :class:`uuid.UUID` is accepted as well as a
             string.
         field (str): The argument's name, used in the error message.
+        hint (str): A sentence appended to the error message, for a field
+            where a malformed value has an obvious intended meaning.
+            (default: :obj:`""`)
 
     Returns:
         str: The id in lower-case canonical form, safe to put in a URL path.
@@ -57,14 +66,24 @@ def require_uuid(value: Any, field: str) -> str:
             path separator, a dot segment, a query or fragment, percent
             encoding, and the empty string are all refused.
     """
+    text: str | None = None
     if isinstance(value, uuid.UUID):
-        return str(value)
-    if isinstance(value, str) and _UUID_RE.fullmatch(value):
-        return value.lower()
-    shown = repr(value) if len(repr(value)) <= 80 else repr(value)[:77] + "..."
+        # A subclass may override __str__; whatever it returns is checked
+        # below like any other string, never trusted.
+        value = str(value)
+    if isinstance(value, str):
+        # str.__str__ bypasses any override and copies a subclass into a
+        # plain str, so the text checked is the text returned.
+        text = str.__str__(value)
+        if _UUID_RE.fullmatch(text):
+            return text.lower()
+    shown = repr(text if text is not None else value)
+    if len(shown) > 80:
+        shown = shown[:77] + "..."
     raise GoodMemIdError(
         f"{field} must be a UUID such as "
         f"'01a0d44b-748d-72eb-b54e-c3ea2d956927'; got {shown}. GoodMem ids "
         "are UUIDs, and anything else could redirect the request to another "
         "resource, so it was refused before any request was made."
+        + (f" {hint}" if hint else "")
     )
