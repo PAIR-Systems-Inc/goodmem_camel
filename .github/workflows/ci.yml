@@ -44,7 +44,7 @@ jobs:
         run: mypy camel_goodmem
 
       - name: Offline suite
-        run: pytest tests/test_goodmem_toolkit.py -v
+        run: pytest tests/test_goodmem_toolkit.py tests/test_goodmem_ids.py -v
 
       - name: Live tests must skip without credentials
         env:

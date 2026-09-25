@@ -36,6 +36,15 @@ from camel_goodmem._uploads import (
 FIXTURES = Path(__file__).parent / "goodmem_fixtures"
 BASE = "https://goodmem.test"
 
+# GoodMem ids are UUIDs, and the toolkit refuses anything else before a
+# request is made, so every id a test hands the toolkit is a real-shaped one.
+SPACE = "01a0d44b-746f-775b-b91e-bc73d4058e27"
+MEMORY = "01a0d44b-748d-72eb-b54e-c3ea2d956927"
+RERANKER = "019cfd1d-5b7e-7a41-9c3d-2f0e8a6b4c11"
+EMB_VOYAGE = "019cfd1c-c033-7517-b7de-f73941a0464b"
+EMB_QWEN = "019cfd1c-d2a8-7f40-8e6b-91c4a7d3e052"
+SPACE_2 = "01a0d44b-96ae-7081-bc16-5644e701222a"
+
 
 def fixture(name: str) -> bytes:
     return (FIXTURES / name).read_bytes()
@@ -52,7 +61,7 @@ def make_toolkit(handler, **kwargs) -> GoodMemToolkit:
             headers={"X-API-Key": "gm_offline_test_key"},
         ),
     )
-    kwargs.setdefault("space_ids", ["space-1"])
+    kwargs.setdefault("space_ids", [SPACE])
     return GoodMemToolkit(
         base_url=BASE, api_key="gm_offline_test_key", client=client, **kwargs
     )
@@ -211,7 +220,7 @@ class TestTimeouts:
         from goodmem import Goodmem
 
         tk = GoodMemToolkit(
-            base_url=BASE, api_key="k", space_ids=["s"], timeout=12.5
+            base_url=BASE, api_key="k", space_ids=[SPACE], timeout=12.5
         )
         assert isinstance(tk._client, Goodmem)
         assert tk._owns_client is True
@@ -298,7 +307,7 @@ class TestScoreSemantics:
     def test_min_score_warns_and_names_the_range_when_it_empties(self):
         tk = make_toolkit(
             retrieve_handler(fixture("retrieve_ok.ndjson")),
-            reranker_id="rr-1",
+            reranker_id=RERANKER,
             min_score=99.0,
         )
         with pytest.warns(UserWarning, match="observed scores ranged"):
@@ -444,31 +453,31 @@ class TestSpaceReuse:
 
     def test_reuse_requires_a_matching_embedder(self):
         tk = make_toolkit(
-            self._spaces_handler([_space("s-1", "notes", ["emb-voyage"])])
+            self._spaces_handler([_space(SPACE, "notes", [EMB_VOYAGE])])
         )
         with pytest.raises(GoodMemError) as err:
-            tk.create_space("notes", "emb-qwen")
-        assert "emb-voyage" in str(err.value)
-        assert "emb-qwen" in str(err.value)
+            tk.create_space("notes", EMB_QWEN)
+        assert EMB_VOYAGE in str(err.value)
+        assert EMB_QWEN in str(err.value)
 
     def test_reuse_succeeds_when_the_embedder_matches(self):
         tk = make_toolkit(
-            self._spaces_handler([_space("s-1", "notes", ["emb-voyage"])])
+            self._spaces_handler([_space(SPACE, "notes", [EMB_VOYAGE])])
         )
-        out = tk.create_space("notes", "emb-voyage")
-        assert out["reused"] is True and out["spaceId"] == "s-1"
+        out = tk.create_space("notes", EMB_VOYAGE)
+        assert out["reused"] is True and out["spaceId"] == SPACE
 
     def test_an_ambiguous_name_is_an_error_not_a_coin_flip(self):
         tk = make_toolkit(
             self._spaces_handler(
                 [
-                    _space("s-1", "notes", ["emb-voyage"]),
-                    _space("s-2", "notes", ["emb-voyage"]),
+                    _space(SPACE, "notes", [EMB_VOYAGE]),
+                    _space(SPACE_2, "notes", [EMB_VOYAGE]),
                 ]
             )
         )
         with pytest.raises(GoodMemError, match="refusing to guess"):
-            tk.create_space("notes", "emb-voyage")
+            tk.create_space("notes", EMB_VOYAGE)
 
 
 # ---------------------------------------------------------------------------
@@ -539,14 +548,14 @@ class TestContent:
 
     def test_text_content_is_returned_as_text(self):
         tk = make_toolkit(self._handler(b"hello there", "text/plain"))
-        out = tk.get_memory("m-1", include_content=True)
+        out = tk.get_memory(MEMORY, include_content=True)
         assert out["content"] == "hello there"
         assert out["contentEncoding"] == "text"
 
     def test_binary_content_is_returned_as_base64_not_mangled(self):
         pdf = b"%PDF-1.4\x00\x01\x02\xff\xfe"
         tk = make_toolkit(self._handler(pdf, "application/pdf"))
-        out = tk.get_memory("m-1", include_content=True)
+        out = tk.get_memory(MEMORY, include_content=True)
         import base64
 
         assert base64.b64decode(out["content"]) == pdf
@@ -557,11 +566,11 @@ class TestContent:
             self._handler(b'{"message":"gone"}', "application/json", 404)
         )
         with pytest.raises(GoodMemError):
-            tk.get_memory("m-1", include_content=True)
+            tk.get_memory(MEMORY, include_content=True)
 
     def test_content_is_not_fetched_unless_asked_for(self):
         tk = make_toolkit(self._handler(b"x", "text/plain"))
-        out = tk.get_memory("m-1")
+        out = tk.get_memory(MEMORY)
         assert "content" not in out
 
 
@@ -628,13 +637,13 @@ class TestSurfaceAndSafety:
             ),
         )
         tk = GoodMemToolkit(
-            base_url=BASE, api_key="k", client=client, space_ids=["s"]
+            base_url=BASE, api_key="k", client=client, space_ids=[SPACE]
         )
         tk.close()
         assert tk._owns_client is False
         # still usable after the toolkit was closed
         tk2 = GoodMemToolkit(
-            base_url=BASE, api_key="k", client=client, space_ids=["s"]
+            base_url=BASE, api_key="k", client=client, space_ids=[SPACE]
         )
         assert tk2._client is client
 
@@ -698,7 +707,7 @@ class TestPublishedPackageRegressions:
             return httpx.Response(200, json=memory)
 
         tk = make_toolkit(handler)
-        out = tk.get_memory("m-1", include_content=True)
+        out = tk.get_memory(MEMORY, include_content=True)
         _json.dumps(out)  # would raise on bytes
         assert isinstance(out["content"], str)
 

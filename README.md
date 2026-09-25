@@ -5,7 +5,7 @@ agents. Documents are chunked, embedded and searched server-side; this package
 wraps the official `goodmem` Python SDK and exposes it to CAMEL both as a
 toolkit and as a `BaseRetriever`.
 
-**Version 0.2.0.** Verified against GoodMem server **v1.0.320**.
+**Version 0.2.1.** Verified against GoodMem server **v1.0.320**.
 
 > **Upgrading from 0.1.0.** 0.1.0 talked to GoodMem over hand-written HTTP and
 > had defects that were invisible from its return values — a failed search
@@ -54,6 +54,17 @@ Opt in to more:
 | `allow_admin_tools=True` | `list_spaces`, `list_embedders`, `goodmem_get_space`, `create_space`, `update_space`, `list_memories`, `get_memory` |
 | `allow_delete=True` | `delete_memory`, `delete_space` |
 | `allow_write=False` | removes `goodmem_remember` |
+
+### Ids must be UUIDs
+
+Every GoodMem id this package handles — the `space_ids` and `reranker_id` you
+configure, and the `memory_id`, `space_id` and `embedder_id` a tool or method
+takes — must be a UUID. Anything else raises `GoodMemIdError`, naming the
+argument, **before any request is made**, because the GoodMem SDK puts ids
+into request paths unescaped: `delete_memory("../spaces/<id>")` would
+otherwise send `DELETE /v1/spaces/<id>` and delete a whole space. Upper-case
+UUIDs are accepted and sent lower-case. The tool schemas declare these
+arguments with the same UUID pattern, so the model is told up front.
 
 ## Retrieval results
 
@@ -165,6 +176,18 @@ toolkit = GoodMemToolkit(client=Goodmem(base_url=..., api_key=...))
 An injected client keeps its own server, credentials and TLS settings, and is
 never closed by the toolkit.
 
+## Changes in 0.2.1
+
+Measured against a local server that records every request line, driving the
+real SDK and `httpx`:
+
+| Was (0.2.0) | Now |
+| --- | --- |
+| `delete_memory("../spaces/<id>")` sent `DELETE /v1/spaces/<id>` and returned `{"success": True}`; the same traversal reached `delete_space`, `update_space`, `goodmem_get_space`, `get_memory` and `list_memories` | Refused with `GoodMemIdError` naming the argument; nothing is sent |
+| `%2e%2e/…`, `..%2F…`, a leading space, `?x=1` and `#frag` after an id all reached the server; `list_memories("<id>#frag")` requested a different endpoint, `GET /v1/spaces/<id>` | Only a canonical UUID is accepted |
+| `list_memories("")` silently listed the configured space | Refused |
+| A malformed `space_ids` or `reranker_id` was sent as-is, and `list_memories()` put the configured space id in a URL path | Refused at construction, and again at every use |
+
 ## Changes in 0.2.0
 
 Every item below was reproduced against the published 0.1.0 wheel, live
@@ -195,13 +218,14 @@ against GoodMem v1.0.320.
 | Suite | Count | Needs |
 | --- | --- | --- |
 | `tests/test_goodmem_toolkit.py` | 69 | nothing — the real SDK over a mock transport, fed NDJSON captured from a live server |
+| `tests/test_goodmem_ids.py` | 345 | nothing — the real SDK and `httpx` against a local server that records every request; every id-taking entry point (method, CAMEL tool, MCP tool, configuration) × ten malformed ids must send nothing |
 | `tests/test_goodmem_live.py` | 29 | `GOODMEM_API_KEY` + `GOODMEM_BASE_URL`; skips entirely without them |
 
 ```bash
 pip install -e ".[dev]"
 
 # offline
-pytest tests/test_goodmem_toolkit.py
+pytest tests/test_goodmem_toolkit.py tests/test_goodmem_ids.py
 
 # live (pin the embedder if the server's first one is unhealthy)
 GOODMEM_API_KEY=... GOODMEM_BASE_URL=... \

@@ -4,7 +4,7 @@ description = "GoodMem integration for CAMEL."
 authors = [{ name = "PAIR Systems" }]
 readme = "README.md"
 requires-python = ">=3.10"
-version = "0.2.0"
+version = "0.2.1"
 license-files = ["LICENSE"]
 urls.homepage = "https://github.com/PAIR-Systems-Inc/goodmem_camel"
 urls.source = "https://github.com/PAIR-Systems-Inc/goodmem_camel"
@@ -29,6 +29,10 @@ dependencies = [
     # what `pip install camel-goodmem==0.1.0` does today. Pinned until
     # camel-ai supports mcp 2.x.
     "mcp<2",
+    # Declares id parameters as UUIDs in the tool schema the model sees.
+    # Already required by both camel-ai and goodmem; listed because it is
+    # imported directly.
+    "pydantic>=2",
 ]
 
 [project.optional-dependencies]
