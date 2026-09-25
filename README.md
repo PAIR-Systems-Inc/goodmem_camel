@@ -19,6 +19,10 @@ toolkit and as a `BaseRetriever`.
 pip install camel-goodmem
 ```
 
+Requires Python 3.10+, `camel-ai>=0.2.79`, `goodmem>=0.1.35`,
+`pydantic>=2.11` and `mcp<2`. CI installs exactly those floors and runs the
+offline suite against them.
+
 ```bash
 export GOODMEM_API_KEY="gm_your_key_here"
 export GOODMEM_BASE_URL="https://your-goodmem-server"
@@ -226,6 +230,7 @@ real SDK and `httpx`:
 | `list_memories("")` silently listed the configured space | Refused |
 | A malformed `space_ids` or `reranker_id` was sent as-is, and `list_memories()` put the configured space id in a URL path | Refused at construction, and again at every use |
 | `reranker_id=""` meant "no reranker" | **Refused** with `GoodMemIdError` at construction; the message says to pass `reranker_id=None` |
+| Declared `camel-ai>=0.2.0` and `pydantic>=2`, neither true: camel-ai 0.2.0/0.2.10 fail to import this package (`No module named 'camel.logger'`), 0.2.20/0.2.59 fail on camel-ai's own undeclared `PIL`, and 0.2.60–0.2.78 import it but turn every exception a method raises into `IndexError` (245 of 466 offline tests fail; `delete_memory("../spaces/<id>")` raised `IndexError`, not `GoodMemIdError`). On Python 3.10 pydantic 2.10 made `get_tools()` raise `TypeError` | `camel-ai>=0.2.79`, `pydantic>=2.11` (`mcp<2` kept); a CI `floors` job installs them with `--resolution lowest-direct`, checks the installed versions equal the declared floors, imports the package and runs the offline suite |
 | With `reranker_id` set and the reranker failing, the server's vector fallback hits (raw `-0.5846`) were labelled `scoreKind: "reranker"` from configuration and left un-negated (`score: -0.5846`); `min_score=0.0` then removed every hit the server returned | `scoreKind`/orientation come from the response: `RERANKING_FAILED` or a reranker `NOT_FOUND` means `vector`, `score: 0.5846`, `min_score` skipped, the hit kept, `partial: true` with both statuses |
 | `metadata_filter` took only a dict, so the expression this README built with `filters` raised `ValueError: dictionary update sequence element #0 has length 1; 2 is required`, and `compare` / `one_of` / `not_equals` / `any_of` could not be applied at all; `GoodMemRetriever` took no filter | `metadata_filter` is `dict` or a `filters` expression string (sent verbatim) on the toolkit and the retriever; the retriever's is ANDed with the toolkit's. A bad filter fails at construction |
 
@@ -258,7 +263,7 @@ against GoodMem v1.0.320.
 
 | Suite | Count | Needs |
 | --- | --- | --- |
-| `tests/test_goodmem_toolkit.py` | 69 | nothing — the real SDK over a mock transport, fed NDJSON captured from a live server |
+| `tests/test_goodmem_toolkit.py` | 86 | nothing — the real SDK over a mock transport, fed NDJSON captured from a live server |
 | `tests/test_goodmem_ids.py` | 380 | nothing — the real SDK and `httpx` against a local server that records every request; every id-taking entry point (method, CAMEL tool, MCP tool, configuration) × ten malformed ids must send nothing, and a `str` or `uuid.UUID` subclass cannot change the id after it is checked. It also runs the live tests that depend on the id check against that server, and fails if any other live test passes an id the check would refuse |
 | `tests/test_goodmem_live.py` | 30 | `GOODMEM_API_KEY` + `GOODMEM_BASE_URL`; skips entirely without them |
 
@@ -277,6 +282,12 @@ GOODMEM_API_KEY=... GOODMEM_BASE_URL=... \
 ruff check camel_goodmem tests
 ruff format --check camel_goodmem tests
 mypy camel_goodmem
+
+# ...and the declared floors, on Python 3.10
+uv venv --python 3.10 floor
+uv pip install --python floor/bin/python --resolution lowest-direct -e .
+uv pip install --python floor/bin/python pytest pytest-timeout
+floor/bin/python -m pytest tests/test_goodmem_toolkit.py tests/test_goodmem_ids.py
 ```
 
 The live suite creates one space per run and asserts, against a fresh server

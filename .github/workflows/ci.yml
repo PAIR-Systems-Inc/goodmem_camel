@@ -68,6 +68,73 @@ jobs:
           /tmp/clean/bin/pip install --quiet dist/*.whl
           /tmp/clean/bin/python -c "import camel_goodmem; print(camel_goodmem.__version__)"
 
+  # The declared lower bounds, installed as-is. `--resolution lowest-direct`
+  # takes the floor of every direct dependency (camel-ai, goodmem, pydantic,
+  # and mcp at the lowest camel-ai accepts), then the package is imported and
+  # the offline suite run against them. camel-ai 0.2.0-0.2.59 cannot import
+  # this package; 0.2.60-0.2.78 import it but turn every exception a toolkit
+  # method raises into IndexError; pydantic 2.10 breaks every tool on 3.10.
+  floors:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install the declared floors
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip uv
+          uv venv /tmp/floor --python "$(command -v python)"
+          uv pip install --python /tmp/floor/bin/python \
+            --resolution lowest-direct -e .
+          uv pip install --python /tmp/floor/bin/python pytest pytest-timeout
+
+      - name: The installed versions are the declared floors
+        run: |
+          set -euo pipefail
+          /tmp/floor/bin/python - <<'PY'
+          import re
+          from importlib.metadata import version
+
+          text = open("pyproject.toml").read()
+          block = text.split("dependencies = [", 1)[1]
+          code = [ln for ln in block.splitlines() if not ln.strip().startswith("#")]
+          deps = "\n".join(code).split("]", 1)[0]
+          floors = dict(re.findall(r'"([A-Za-z0-9_.-]+)>=([0-9][^",<]*)', deps))
+          assert {"camel-ai", "goodmem", "pydantic"} <= set(floors), floors
+
+
+          def padded(v):
+              parts = [int(x) for x in v.split(".")]
+              return parts + [0] * (3 - len(parts))
+
+          wrong = {}
+          for name, floor in sorted(floors.items()):
+              got = version(name)
+              print(f"{name}: declared >={floor}, installed {got}")
+              if padded(got) != padded(floor):
+                  wrong[name] = got
+          assert not wrong, f"not at the declared floor: {wrong}"
+          major = int(version("mcp").split(".")[0])
+          print(f"mcp: declared <2, installed {version('mcp')}")
+          assert major < 2
+          PY
+
+      - name: Package imports at the floors
+        run: |
+          set -euo pipefail
+          /tmp/floor/bin/python -c "import camel_goodmem; print(camel_goodmem.__version__)"
+
+      - name: Offline suite at the floors
+        run: |
+          set -euo pipefail
+          /tmp/floor/bin/python -m pytest \
+            tests/test_goodmem_toolkit.py tests/test_goodmem_ids.py -v
+
   gates:
     runs-on: ubuntu-latest
     steps:
