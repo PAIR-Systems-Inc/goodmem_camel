@@ -4,6 +4,8 @@ from typing import Any
 from camel.logger import get_logger
 from camel.retrievers.base import BaseRetriever
 
+from camel_goodmem._filters import resolve_filter
+
 logger = get_logger(__name__)
 
 DEFAULT_TOP_K_RESULTS = 5
@@ -23,10 +25,24 @@ class GoodMemRetriever(BaseRetriever):
         toolkit (Any): A configured
             :class:`~camel_goodmem.GoodMemToolkit`, which carries the
             connection, the spaces and any metadata filter.
+        metadata_filter (Optional[Union[Dict[str, Any], str]]): A filter
+            every result must also match: a mapping (an ``AND`` of
+            equalities) or an expression built with
+            :mod:`camel_goodmem.filters`, sent verbatim. It is combined with
+            the toolkit's own ``metadata_filter`` by ``AND``, so it can narrow
+            the toolkit's scope but never widen it. (default: :obj:`None`)
     """
 
-    def __init__(self, toolkit: Any) -> None:
+    def __init__(
+        self,
+        toolkit: Any,
+        *,
+        metadata_filter: dict[str, Any] | str | None = None,
+    ) -> None:
         self.toolkit = toolkit
+        # Resolved now so a bad filter fails at construction.
+        resolve_filter(metadata_filter)
+        self.metadata_filter = metadata_filter
 
     def process(
         self,
@@ -77,7 +93,9 @@ class GoodMemRetriever(BaseRetriever):
                 and nothing usable came back, a single dictionary is returned
                 whose ``text`` states what the server reported.
         """
-        outcome = self.toolkit._retrieve(query, top_k)
+        outcome = self.toolkit._retrieve(
+            query, top_k, narrow=resolve_filter(self.metadata_filter)
+        )
 
         hits = outcome.hits
         if similarity_threshold is not None:

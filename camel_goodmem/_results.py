@@ -21,6 +21,11 @@ INFORMATIONAL_CODES = frozenset(
     {"LLM_CAPABILITY_INFERRED", "FEATURE_DISABLED"}
 )
 
+#: The status the server sends when a requested reranker could not run. The
+#: server then returns the vector-stage hits instead, scored as negative
+#: distances rather than on the reranker's scale.
+RERANKING_FAILED_CODE = "RERANKING_FAILED"
+
 #: Surfaced in place of a code this build of the SDK does not recognise.
 UNKNOWN_CODE = "UNKNOWN"
 
@@ -109,6 +114,9 @@ class RetrievalOutcome:
         result_set_id (str): The server's identifier for this result set.
         abstract_reply (Optional[str]): The LLM summary, when one was asked
             for and produced.
+        reranked (bool): Whether the hits carry reranker scores. Decided from
+            what the server reported, not from configuration: when a reranker
+            was requested but failed, the hits are the vector fallback.
     """
 
     hits: list[RetrievalHit] = field(default_factory=list)
@@ -116,6 +124,7 @@ class RetrievalOutcome:
     partial: bool = False
     result_set_id: str = ""
     abstract_reply: str | None = None
+    reranked: bool = False
 
     @property
     def status_dicts(self) -> list[dict[str, Any]]:
@@ -164,6 +173,31 @@ def classify_status(raw_code: str | None, message: str) -> RetrievalStatus:
     return RetrievalStatus(code=raw_code, message=message)
 
 
+def reranking_failed(statuses: "list[RetrievalStatus]") -> bool:
+    r"""Returns whether the server reported that reranking did not happen.
+
+    ``RERANKING_FAILED`` says so directly. A ``NOT_FOUND`` naming the
+    reranker (live: ``details: {"reranker_id": ...}``, message "Reranker not
+    found") means the same, even if it arrives alone.
+
+    Args:
+        statuses (List[RetrievalStatus]): The statuses of one retrieval.
+
+    Returns:
+        bool: ``True`` if the hits cannot be reranker-scored.
+    """
+    for status in statuses:
+        if status.code == RERANKING_FAILED_CODE:
+            return True
+        if status.code == "NOT_FOUND" and (
+            "reranker_id" in status.details
+            or "rerankerId" in status.details
+            or "reranker" in status.message.lower()
+        ):
+            return True
+    return False
+
+
 def _as_dict(value: Any) -> dict[str, Any]:
     r"""Best-effort conversion of an SDK model or mapping to a dictionary."""
     if value is None:
@@ -207,9 +241,10 @@ def outcome_from_events(
 
     Args:
         events (Any): An iterable of retrieval events from the SDK.
-        reranked (bool): Whether a reranker was requested, which decides
-            whether scores are reranker scores or vector distances.
-            (default: :obj:`False`)
+        reranked (bool): Whether a reranker was requested. The hits are
+            scored as reranked only if the server did not also report that
+            reranking failed -- then they are the vector fallback, negative
+            distances, and are oriented as such. (default: :obj:`False`)
 
     Returns:
         RetrievalOutcome: The hits, the statuses, and whether the retrieval
@@ -281,12 +316,15 @@ def outcome_from_events(
             text=str(_getattr_any(inner, "chunk_text", "chunkText") or ""),
             memory_id=memory_id,
             raw_score=raw_value,
-            score=orient_score(raw_value, reranked=reranked),
-            score_kind="reranker" if reranked else "vector",
         )
         pending.append((hit, memory_id))
 
+    # Decided once the whole stream is in: a RERANKING_FAILED can follow the
+    # hits it applies to.
+    outcome.reranked = reranked and not reranking_failed(outcome.statuses)
     for hit, memory_id in pending:
+        hit.score = orient_score(hit.raw_score, reranked=outcome.reranked)
+        hit.score_kind = "reranker" if outcome.reranked else "vector"
         mem = memories.get(memory_id) or {}
         if mem:
             hit.space_id = str(mem.get("spaceId") or mem.get("space_id") or "")
