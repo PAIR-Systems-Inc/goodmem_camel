@@ -106,8 +106,9 @@ class GoodMemToolkit(BaseToolkit):
             ``None`` for no reranker: an empty string is a malformed id and
             is refused. (default: :obj:`None`)
         min_score (Optional[float]): Drop hits scoring below this value.
-            Applies only when ``reranker_id`` is set, because reranker scales
-            are provider-dependent. Off by default. (default: :obj:`None`)
+            Applies only to reranker scores: not without ``reranker_id``, and
+            not when the server reports that reranking failed and returns
+            vector hits instead. Off by default. (default: :obj:`None`)
         metadata_filter (Optional[Union[Dict[str, Any], str]]): A filter
             every retrieved memory must match, applied server-side. Either a
             mapping, which must match as an ``AND`` of equalities, or an
@@ -331,7 +332,10 @@ class GoodMemToolkit(BaseToolkit):
         except Exception as exc:
             raise _wrap_api_error(exc, "Retrieval") from exc
 
-        if self.min_score is not None and reranker_id:
+        # A reranker threshold applies only to reranker scores. When the
+        # reranker failed the server returns vector hits instead; applying
+        # the threshold to those would discard what the server returned.
+        if self.min_score is not None and outcome.reranked:
             kept = [
                 h
                 for h in outcome.hits

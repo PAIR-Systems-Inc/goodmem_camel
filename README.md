@@ -112,9 +112,16 @@ GoodMem produces two kinds of score, and they are not comparable:
   scale. Measured live on the same five documents: Voyage `rerank-2.5` returned
   `0.27..0.93`, Jina `jina-reranker-v3` returned `-0.14..0.43`.
 
-So there is **no default threshold**, and `min_score` applies only when
-`reranker_id` is set. If a threshold removes everything, the toolkit warns and
+So there is **no default threshold**, and `min_score` applies only to
+reranker scores. If a threshold removes everything, the toolkit warns and
 names the range it actually saw rather than returning a silent empty list.
+
+`scoreKind` says what the server actually did, not what was configured. When
+a reranker is set but fails, the server reports `RERANKING_FAILED` (and
+`NOT_FOUND` for a missing reranker) and still returns the vector-stage hits.
+Those hits are `scoreKind: "vector"`, flipped like any vector score, and
+`min_score` is not applied to them, so a reranker threshold cannot discard
+them; `partial` is set and `statuses` carries both codes.
 
 ## Metadata filters
 
@@ -219,6 +226,7 @@ real SDK and `httpx`:
 | `list_memories("")` silently listed the configured space | Refused |
 | A malformed `space_ids` or `reranker_id` was sent as-is, and `list_memories()` put the configured space id in a URL path | Refused at construction, and again at every use |
 | `reranker_id=""` meant "no reranker" | **Refused** with `GoodMemIdError` at construction; the message says to pass `reranker_id=None` |
+| With `reranker_id` set and the reranker failing, the server's vector fallback hits (raw `-0.5846`) were labelled `scoreKind: "reranker"` from configuration and left un-negated (`score: -0.5846`); `min_score=0.0` then removed every hit the server returned | `scoreKind`/orientation come from the response: `RERANKING_FAILED` or a reranker `NOT_FOUND` means `vector`, `score: 0.5846`, `min_score` skipped, the hit kept, `partial: true` with both statuses |
 | `metadata_filter` took only a dict, so the expression this README built with `filters` raised `ValueError: dictionary update sequence element #0 has length 1; 2 is required`, and `compare` / `one_of` / `not_equals` / `any_of` could not be applied at all; `GoodMemRetriever` took no filter | `metadata_filter` is `dict` or a `filters` expression string (sent verbatim) on the toolkit and the retriever; the retriever's is ANDed with the toolkit's. A bad filter fails at construction |
 
 ## Changes in 0.2.0

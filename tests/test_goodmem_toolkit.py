@@ -314,6 +314,85 @@ class TestScoreSemantics:
             result = tk.goodmem_search("canary")
         assert result["totalResults"] == 0
 
+    def test_reranker_failure_hits_are_vector_scored_and_negated(self):
+        """With a reranker configured the server answered RERANKING_FAILED
+        and NOT_FOUND and fell back to vector hits (raw -0.5846). 0.2.1
+        labelled them "reranker" from configuration, leaving the distance
+        un-negated as score -0.5846."""
+        tk = make_toolkit(
+            retrieve_handler(fixture("retrieve_degraded_hits.ndjson")),
+            reranker_id=RERANKER,
+        )
+        result = tk.goodmem_search("canary")
+        hit = result["results"][0]
+        assert hit["rawScore"] < 0
+        assert hit["scoreKind"] == "vector"
+        assert hit["score"] == pytest.approx(-hit["rawScore"])
+        assert result["partial"] is True
+        codes = {s["code"] for s in result["statuses"]}
+        assert {"NOT_FOUND", "RERANKING_FAILED"} <= codes
+
+    def test_reranker_threshold_does_not_discard_fallback_hits(self, recwarn):
+        """Q4a: min_score is a reranker threshold; applied to the vector
+        fallback it removed every hit the server returned."""
+        tk = make_toolkit(
+            retrieve_handler(fixture("retrieve_degraded_hits.ndjson")),
+            reranker_id=RERANKER,
+            min_score=0.9,
+        )
+        result = tk.goodmem_search("canary")
+        assert result["totalResults"] == 1
+        assert result["partial"] is True
+        assert not [w for w in recwarn if "min_score" in str(w.message)]
+
+    def test_retriever_reports_fallback_hits_as_vector(self):
+        tk = make_toolkit(
+            retrieve_handler(fixture("retrieve_degraded_hits.ndjson")),
+            reranker_id=RERANKER,
+        )
+        rows = GoodMemRetriever(tk).query("canary", similarity_threshold=0.0)
+        assert len(rows) == 1
+        extra = rows[0]["extra_info"]
+        assert extra["goodmem_score_kind"] == "vector"
+        assert float(rows[0]["similarity score"]) > 0
+        assert extra["goodmem_partial"] is True
+
+    def test_reranking_failed_after_the_hits_still_counts(self):
+        events = [
+            _chunk("c1", "alpha", "mem-A", -0.2715),
+            {"status": {"code": "RERANKING_FAILED", "message": "boom"}},
+        ]
+        outcome = outcome_from_events(_as_models(events), reranked=True)
+        assert outcome.reranked is False
+        assert outcome.hits[0].score_kind == "vector"
+        assert outcome.hits[0].score == pytest.approx(0.2715)
+        assert outcome.partial is True
+
+    def test_reranker_not_found_alone_means_not_reranked(self):
+        events = [
+            {
+                "status": {
+                    "code": "NOT_FOUND",
+                    "message": "Reranker not found: x",
+                    "details": {"reranker_id": RERANKER},
+                }
+            },
+            _chunk("c1", "alpha", "mem-A", -0.5947),
+        ]
+        outcome = outcome_from_events(_as_models(events), reranked=True)
+        assert outcome.reranked is False
+        assert outcome.hits[0].score == pytest.approx(0.5947)
+
+    def test_an_unrelated_problem_keeps_reranker_scores(self):
+        events = [
+            {"status": {"code": "SOME_FUTURE_CODE", "message": "odd"}},
+            _chunk("c1", "alpha", "mem-A", 0.87),
+        ]
+        outcome = outcome_from_events(_as_models(events), reranked=True)
+        assert outcome.reranked is True
+        assert outcome.hits[0].score_kind == "reranker"
+        assert outcome.hits[0].score == pytest.approx(0.87)
+
     def test_no_threshold_is_sent_by_default(self):
         capture = {}
         tk = make_toolkit(
