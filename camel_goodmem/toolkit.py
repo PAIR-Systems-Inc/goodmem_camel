@@ -8,7 +8,7 @@ from camel.toolkits.base import BaseToolkit
 from camel.toolkits.function_tool import FunctionTool
 from camel.utils import MCPServer, dependencies_required
 
-from camel_goodmem._filters import from_mapping
+from camel_goodmem._filters import all_of, resolve_filter
 from camel_goodmem._results import (
     RetrievalOutcome,
     log_if_degraded,
@@ -108,8 +108,12 @@ class GoodMemToolkit(BaseToolkit):
         min_score (Optional[float]): Drop hits scoring below this value.
             Applies only when ``reranker_id`` is set, because reranker scales
             are provider-dependent. Off by default. (default: :obj:`None`)
-        metadata_filter (Optional[Dict[str, Any]]): Metadata that every
-            retrieved memory must match, applied server-side.
+        metadata_filter (Optional[Union[Dict[str, Any], str]]): A filter
+            every retrieved memory must match, applied server-side. Either a
+            mapping, which must match as an ``AND`` of equalities, or an
+            expression built with :mod:`camel_goodmem.filters` (``compare``,
+            ``one_of``, ``not_equals``, ``any_of`` ...), sent verbatim. Set by
+            the developer; the model never supplies a filter.
             (default: :obj:`None`)
         allow_write (bool): Whether the model may store new memories.
             (default: :obj:`True`)
@@ -141,7 +145,7 @@ class GoodMemToolkit(BaseToolkit):
         upload_dir: str | Path | None = None,
         reranker_id: str | None = None,
         min_score: float | None = None,
-        metadata_filter: dict[str, Any] | None = None,
+        metadata_filter: dict[str, Any] | str | None = None,
         allow_write: bool = True,
         allow_admin_tools: bool = False,
         allow_delete: bool = False,
@@ -171,7 +175,14 @@ class GoodMemToolkit(BaseToolkit):
             else None
         )
         self.min_score = min_score
-        self.metadata_filter = dict(metadata_filter or {})
+        # Resolved now so a bad filter fails at construction rather than on
+        # the first search; resolved again at use, as it is public.
+        resolve_filter(metadata_filter)
+        self.metadata_filter: dict[str, Any] | str = (
+            dict(metadata_filter)
+            if isinstance(metadata_filter, dict)
+            else metadata_filter or {}
+        )
         self.allow_write = allow_write
         self.allow_admin_tools = allow_admin_tools
         self.allow_delete = allow_delete
@@ -269,9 +280,14 @@ class GoodMemToolkit(BaseToolkit):
             self.reranker_id, "reranker_id", hint=_NO_RERANKER_HINT
         )
 
-    def _space_keys(self) -> list[dict[str, Any]]:
-        r"""Builds the ``spaceKeys`` payload, including any metadata filter."""
-        expression = from_mapping(self.metadata_filter)
+    def _space_keys(self, narrow: str = "") -> list[dict[str, Any]]:
+        r"""Builds the ``spaceKeys`` payload, including any metadata filter.
+
+        Args:
+            narrow (str): A further expression that must also match, combined
+                with the toolkit's own filter by ``AND``. (default: ``""``)
+        """
+        expression = all_of(resolve_filter(self.metadata_filter), narrow)
         keys: list[dict[str, Any]] = []
         for space_id in self._require_spaces():
             key: dict[str, Any] = {"spaceId": space_id}
@@ -280,12 +296,16 @@ class GoodMemToolkit(BaseToolkit):
             keys.append(key)
         return keys
 
-    def _retrieve(self, query: str, top_k: int) -> RetrievalOutcome:
+    def _retrieve(
+        self, query: str, top_k: int, *, narrow: str = ""
+    ) -> RetrievalOutcome:
         r"""Runs one retrieval and folds the stream into an outcome.
 
         Args:
             query (str): The natural-language query.
             top_k (int): How many chunks to ask the server for.
+            narrow (str): A further filter expression, ANDed with the
+                toolkit's own. (default: ``""``)
 
         Returns:
             RetrievalOutcome: The hits and any statuses the server reported.
@@ -293,7 +313,7 @@ class GoodMemToolkit(BaseToolkit):
         reranker_id = self._require_reranker()
         kwargs: dict[str, Any] = {
             "message": query,
-            "space_keys": self._space_keys(),
+            "space_keys": self._space_keys(narrow),
             "requested_size": top_k,
             "fetch_memory": True,
         }

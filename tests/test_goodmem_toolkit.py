@@ -417,6 +417,112 @@ class TestFilters:
 
 
 # ---------------------------------------------------------------------------
+# metadata_filter accepts a `filters` expression, not only a mapping
+# ---------------------------------------------------------------------------
+
+#: The expression the README builds. 0.2.1 took only a dict, so passing this
+#: raised ``ValueError: dictionary update sequence element #0 has length 1``
+#: and compare / one_of / not_equals / any_of could not be applied at all.
+README_EXPRESSION = filters.all_of(
+    filters.equals("tenant", "acme"),
+    filters.compare("year", ">=", 2026),
+    filters.one_of("kind", ["note", "doc"]),
+)
+
+
+class TestFilterExpressions:
+    def _search_filter(self, **kwargs):
+        capture: dict = {}
+        tk = make_toolkit(
+            retrieve_handler(fixture("retrieve_ok.ndjson"), capture=capture),
+            **kwargs,
+        )
+        tk.goodmem_search("q")
+        return [k.get("filter") for k in capture["body"]["spaceKeys"]]
+
+    def test_toolkit_sends_a_filters_expression_verbatim(self):
+        sent = self._search_filter(
+            space_ids=[SPACE, SPACE_2], metadata_filter=README_EXPRESSION
+        )
+        assert sent == [README_EXPRESSION, README_EXPRESSION]
+
+    def test_every_filters_builder_reaches_the_request(self):
+        expression = filters.any_of(
+            filters.not_equals("status", "archived"),
+            filters.compare("score", "<", 3),
+        )
+        assert self._search_filter(metadata_filter=expression) == [expression]
+
+    def test_a_mapping_still_builds_an_and_of_equalities(self):
+        sent = self._search_filter(metadata_filter={"active": True, "n": 2})
+        assert sent == [
+            "(CAST(val('$.active') AS BOOLEAN) = true) AND "
+            "(CAST(val('$.n') AS NUMERIC) = 2)"
+        ]
+
+    def test_an_empty_expression_sends_no_filter(self):
+        assert self._search_filter(metadata_filter="") == [None]
+        assert self._search_filter(metadata_filter=filters.all_of()) == [None]
+
+    def test_other_types_are_refused_at_construction(self):
+        with pytest.raises(GoodMemFilterError, match="metadata_filter"):
+            make_toolkit(retrieve_handler(b""), metadata_filter=["tenant"])
+
+    def test_a_bad_mapping_value_is_refused_at_construction(self):
+        with pytest.raises(GoodMemFilterError, match="Unsupported filter"):
+            make_toolkit(retrieve_handler(b""), metadata_filter={"x": None})
+
+    def test_the_model_still_cannot_supply_a_filter(self):
+        tk = make_toolkit(
+            retrieve_handler(b""), metadata_filter=README_EXPRESSION
+        )
+        props = tk.get_tools()[0].get_openai_tool_schema()["function"][
+            "parameters"
+        ]["properties"]
+        assert set(props) == {"query", "top_k"}
+
+    def test_retriever_accepts_a_filters_expression(self):
+        capture: dict = {}
+        tk = make_toolkit(
+            retrieve_handler(fixture("retrieve_ok.ndjson"), capture=capture)
+        )
+        GoodMemRetriever(tk, metadata_filter=README_EXPRESSION).query("q")
+        key = capture["body"]["spaceKeys"][0]
+        assert key["filter"] == README_EXPRESSION
+
+    def test_retriever_accepts_a_mapping(self):
+        capture: dict = {}
+        tk = make_toolkit(
+            retrieve_handler(fixture("retrieve_ok.ndjson"), capture=capture)
+        )
+        GoodMemRetriever(tk, metadata_filter={"tenant": "acme"}).query("q")
+        key = capture["body"]["spaceKeys"][0]
+        assert key["filter"] == "CAST(val('$.tenant') AS TEXT) = 'acme'"
+
+    def test_retriever_filter_narrows_the_toolkit_filter_never_widens(self):
+        capture: dict = {}
+        tk = make_toolkit(
+            retrieve_handler(fixture("retrieve_ok.ndjson"), capture=capture),
+            metadata_filter={"tenant": "acme"},
+        )
+        narrow = filters.compare("year", ">=", 2026)
+        GoodMemRetriever(tk, metadata_filter=narrow).query("q")
+        assert capture["body"]["spaceKeys"][0]["filter"] == (
+            f"(CAST(val('$.tenant') AS TEXT) = 'acme') AND ({narrow})"
+        )
+        # The toolkit's own searches keep only the toolkit's filter.
+        tk.goodmem_search("q")
+        assert capture["body"]["spaceKeys"][0]["filter"] == (
+            "CAST(val('$.tenant') AS TEXT) = 'acme'"
+        )
+
+    def test_retriever_refuses_other_types_at_construction(self):
+        tk = make_toolkit(retrieve_handler(b""))
+        with pytest.raises(GoodMemFilterError, match="metadata_filter"):
+            GoodMemRetriever(tk, metadata_filter=42)
+
+
+# ---------------------------------------------------------------------------
 # P32 -- embedder reuse
 # ---------------------------------------------------------------------------
 

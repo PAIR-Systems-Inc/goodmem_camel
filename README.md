@@ -118,31 +118,52 @@ names the range it actually saw rather than returning a silent empty list.
 
 ## Metadata filters
 
-Filters are expressions evaluated server-side, not SQL. Build them with the
-`filters` helper — in 0.1.0 the filter was a raw string the *model* supplied,
-which let it widen its own scope and broke on any value containing an
-apostrophe:
+Filters are expressions evaluated server-side, not SQL. You set them when you
+construct the toolkit or the retriever; the model never supplies one — in
+0.1.0 the filter was a raw string the *model* supplied, which let it widen its
+own scope and broke on any value containing an apostrophe.
+
+`metadata_filter` takes either form:
+
+- a **dict** — every pair must match (an `AND` of equalities);
+- a **string** built with the `filters` helper — `equals`, `not_equals`,
+  `compare`, `one_of`, combined with `all_of` / `any_of` — sent verbatim.
 
 ```python
-from camel_goodmem import GoodMemToolkit, filters
+from camel_goodmem import GoodMemRetriever, GoodMemToolkit, filters
 
+# dict: tenant == "acme" AND active == true
 toolkit = GoodMemToolkit(
-    space_ids=["..."],
+    space_ids=["<space-uuid>"],
     metadata_filter={"tenant": "acme", "active": True},
 )
 
+# expression: anything the dict form cannot say
 expression = filters.all_of(
     filters.equals("tenant", "acme"),
     filters.compare("year", ">=", 2026),
     filters.one_of("kind", ["note", "doc"]),
 )
+toolkit = GoodMemToolkit(space_ids=["<space-uuid>"], metadata_filter=expression)
+result = toolkit.goodmem_search("quarterly plan")
+
+# the retriever takes the same argument; it is ANDed with the toolkit's
+# filter, so a retriever can narrow the toolkit's scope but never widen it
+retriever = GoodMemRetriever(
+    toolkit,
+    metadata_filter=filters.not_equals("status", "archived"),
+)
+rows = retriever.query("quarterly plan", top_k=5)
 ```
 
 The helper applies the escaping the server accepts (`'` → `\'`, `\` → `\\`;
 SQL-style `''` doubling is rejected with HTTP 400), refuses control characters,
 restricts field names, and casts each value to the type GoodMem stored. A
 boolean compared as `TEXT` is accepted with HTTP 200 and matches nothing, so
-`filters` never stringifies a bool.
+neither `filters` nor the dict form ever stringifies a bool; a `None`, list or
+dict value is refused with `GoodMemFilterError` when the toolkit is
+constructed. A string is sent as written, so build it with `filters` rather
+than by hand.
 
 ## Uploads
 
@@ -151,7 +172,11 @@ resolved — symlinks included — and refused if it lands outside that director
 so a model-supplied path cannot read arbitrary files from the host.
 
 ```python
-toolkit = GoodMemToolkit(space_ids=["..."], upload_dir="/srv/agent-uploads")
+from camel_goodmem import GoodMemToolkit
+
+toolkit = GoodMemToolkit(
+    space_ids=["<space-uuid>"], upload_dir="/srv/agent-uploads"
+)
 ```
 
 ## Retriever
@@ -159,7 +184,7 @@ toolkit = GoodMemToolkit(space_ids=["..."], upload_dir="/srv/agent-uploads")
 ```python
 from camel_goodmem import GoodMemRetriever, GoodMemToolkit
 
-retriever = GoodMemRetriever(GoodMemToolkit(space_ids=["..."]))
+retriever = GoodMemRetriever(GoodMemToolkit(space_ids=["<space-uuid>"]))
 retriever.process("Text to remember.")
 rows = retriever.query("what did I store?", top_k=5)
 ```
@@ -194,6 +219,7 @@ real SDK and `httpx`:
 | `list_memories("")` silently listed the configured space | Refused |
 | A malformed `space_ids` or `reranker_id` was sent as-is, and `list_memories()` put the configured space id in a URL path | Refused at construction, and again at every use |
 | `reranker_id=""` meant "no reranker" | **Refused** with `GoodMemIdError` at construction; the message says to pass `reranker_id=None` |
+| `metadata_filter` took only a dict, so the expression this README built with `filters` raised `ValueError: dictionary update sequence element #0 has length 1; 2 is required`, and `compare` / `one_of` / `not_equals` / `any_of` could not be applied at all; `GoodMemRetriever` took no filter | `metadata_filter` is `dict` or a `filters` expression string (sent verbatim) on the toolkit and the retriever; the retriever's is ANDed with the toolkit's. A bad filter fails at construction |
 
 ## Changes in 0.2.0
 
