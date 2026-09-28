@@ -17,6 +17,7 @@ import pytest
 
 from camel_goodmem import (
     GoodMemError,
+    GoodMemIdError,
     GoodMemRetriever,
     GoodMemToolkit,
     filters,
@@ -33,6 +34,11 @@ pytestmark = pytest.mark.skipif(
 )
 
 RUN = uuid.uuid4().hex[:8]
+
+#: A well-formed UUID that names no embedder. The toolkit refuses anything
+#: that is not a UUID before a request is made, so a test that needs the
+#: *server* to reject an id has to send one that passes that check.
+NO_SUCH_EMBEDDER = "00000000-0000-7000-8000-000000000000"
 
 
 def _embedder_id(toolkit: GoodMemToolkit) -> str:
@@ -388,10 +394,27 @@ class TestLiveSpaces:
         assert any(s["name"] == f"camel-live-{RUN}" for s in spaces)
 
     def test_a_rejected_create_carries_the_servers_message(self, admin):
-        with pytest.raises(GoodMemError) as err:
-            admin.create_space(f"camel-live-bad-{RUN}", "not-a-uuid")
-        assert err.value.status_code == 400
+        created = None
+        try:
+            with pytest.raises(GoodMemError) as err:
+                created = admin.create_space(
+                    f"camel-live-bad-{RUN}", NO_SUCH_EMBEDDER
+                )
+        finally:
+            if created:
+                admin._client.spaces.delete(id=created["spaceId"])
+        # The status for an embedder that does not exist was not captured
+        # from a live server, so any 4xx is accepted; what matters is that
+        # the server's own reason reaches the caller.
+        assert 400 <= (err.value.status_code or 0) < 500
+        assert err.value.body and err.value.body in str(err.value)
         assert "embedder" in str(err.value).lower()
+
+    def test_a_malformed_embedder_id_is_refused_before_it_is_sent(self, admin):
+        name = f"camel-live-malformed-{RUN}"
+        with pytest.raises(GoodMemIdError, match="embedder_id must be a UUID"):
+            admin.create_space(name, "not-a-uuid")
+        assert all(s["name"] != name for s in admin.list_spaces())
 
 
 class TestLivePublishedRegressions:

@@ -7,6 +7,7 @@ a :class:`~camel.retrievers.BaseRetriever`.
 
 from camel_goodmem import filters
 from camel_goodmem._filters import GoodMemFilterError
+from camel_goodmem._ids import UUID_PATTERN, GoodMemIdError
 from camel_goodmem._results import (
     INFORMATIONAL_CODES,
     MALFORMED_STREAM_CODE,
@@ -19,13 +20,14 @@ from camel_goodmem._uploads import GoodMemUploadError
 from camel_goodmem.retriever import GoodMemRetriever
 from camel_goodmem.toolkit import GoodMemError, GoodMemToolkit
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 __all__ = [
     "GoodMemToolkit",
     "GoodMemRetriever",
     "GoodMemError",
     "GoodMemFilterError",
+    "GoodMemIdError",
     "GoodMemUploadError",
     "RetrievalHit",
     "RetrievalOutcome",
@@ -33,6 +35,7 @@ __all__ = [
     "INFORMATIONAL_CODES",
     "MALFORMED_STREAM_CODE",
     "UNKNOWN_CODE",
+    "UUID_PATTERN",
     "filters",
     "__version__",
 ]

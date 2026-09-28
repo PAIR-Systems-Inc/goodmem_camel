@@ -8,13 +8,14 @@ from camel.toolkits.base import BaseToolkit
 from camel.toolkits.function_tool import FunctionTool
 from camel.utils import MCPServer, dependencies_required
 
-from camel_goodmem._filters import from_mapping
+from camel_goodmem._filters import all_of, resolve_filter
 from camel_goodmem._results import (
     RetrievalOutcome,
     log_if_degraded,
     outcome_from_events,
 )
 
+from ._ids import UuidStr, require_uuid
 from ._uploads import resolve_upload_path
 
 logger = get_logger(__name__)
@@ -22,6 +23,13 @@ logger = get_logger(__name__)
 #: Bound on how many items a single listing call will pull, so a listing
 #: cannot walk an entire server.
 DEFAULT_MAX_LIST_ITEMS = 200
+
+#: 0.2.0 read ``reranker_id=""`` as "no reranker", so a caller writing
+#: ``reranker_id=os.getenv("X", "")`` meets this refusal at startup.
+_NO_RERANKER_HINT = (
+    "To search without a reranker, pass reranker_id=None or leave it out; "
+    "an empty string is refused rather than read as 'no reranker'."
+)
 
 
 class GoodMemError(RuntimeError):
@@ -82,9 +90,9 @@ class GoodMemToolkit(BaseToolkit):
             (default: :obj:`None`)
         api_key (Optional[str]): The GoodMem API key. Falls back to the
             ``GOODMEM_API_KEY`` environment variable. (default: :obj:`None`)
-        space_ids (Optional[List[str]]): The spaces this toolkit reads from
-            and writes to. The model never chooses a space.
-            (default: :obj:`None`)
+        space_ids (Optional[List[str]]): The UUIDs of the spaces this
+            toolkit reads from and writes to. The model never chooses a
+            space. (default: :obj:`None`)
         verify_ssl (bool): Whether to verify TLS certificates. Set to
             ``False`` only for a server with a self-signed certificate.
             (default: :obj:`True`)
@@ -93,14 +101,20 @@ class GoodMemToolkit(BaseToolkit):
         upload_dir (Optional[Union[str, Path]]): A directory that file
             uploads are confined to. When ``None``, no upload tool is offered
             and no path is ever read from disk. (default: :obj:`None`)
-        reranker_id (Optional[str]): A reranker to apply to retrieval.
-            Without one, no relevance threshold is applied.
-            (default: :obj:`None`)
+        reranker_id (Optional[str]): The UUID of a reranker to apply to
+            retrieval. Without one, no relevance threshold is applied. Pass
+            ``None`` for no reranker: an empty string is a malformed id and
+            is refused. (default: :obj:`None`)
         min_score (Optional[float]): Drop hits scoring below this value.
-            Applies only when ``reranker_id`` is set, because reranker scales
-            are provider-dependent. Off by default. (default: :obj:`None`)
-        metadata_filter (Optional[Dict[str, Any]]): Metadata that every
-            retrieved memory must match, applied server-side.
+            Applies only to reranker scores: not without ``reranker_id``, and
+            not when the server reports that reranking failed and returns
+            vector hits instead. Off by default. (default: :obj:`None`)
+        metadata_filter (Optional[Union[Dict[str, Any], str]]): A filter
+            every retrieved memory must match, applied server-side. Either a
+            mapping, which must match as an ``AND`` of equalities, or an
+            expression built with :mod:`camel_goodmem.filters` (``compare``,
+            ``one_of``, ``not_equals``, ``any_of`` ...), sent verbatim. Set by
+            the developer; the model never supplies a filter.
             (default: :obj:`None`)
         allow_write (bool): Whether the model may store new memories.
             (default: :obj:`True`)
@@ -114,6 +128,10 @@ class GoodMemToolkit(BaseToolkit):
             client. When supplied, its server, credentials and TLS settings
             are used as-is and it is never closed by this toolkit.
             (default: :obj:`None`)
+
+    Every id -- configured here or passed to a method -- must be a UUID. The
+    SDK puts ids into request paths unescaped, so anything else is refused
+    with :class:`~camel_goodmem.GoodMemIdError` before a request is made.
     """
 
     @dependencies_required("goodmem")
@@ -128,7 +146,7 @@ class GoodMemToolkit(BaseToolkit):
         upload_dir: str | Path | None = None,
         reranker_id: str | None = None,
         min_score: float | None = None,
-        metadata_filter: dict[str, Any] | None = None,
+        metadata_filter: dict[str, Any] | str | None = None,
         allow_write: bool = True,
         allow_admin_tools: bool = False,
         allow_delete: bool = False,
@@ -145,11 +163,27 @@ class GoodMemToolkit(BaseToolkit):
         # a repr or a traceback can pick up.
         resolved_key = api_key or os.environ.get("GOODMEM_API_KEY", "")
         self.__api_key = resolved_key
-        self.space_ids = list(space_ids or [])
+        # Checked here so a misconfiguration fails at construction, and again
+        # wherever they are used, because both are public attributes.
+        self.space_ids = [
+            require_uuid(space_id, f"space_ids[{i}]")
+            for i, space_id in enumerate(space_ids or [])
+        ]
         self.verify_ssl = verify_ssl
-        self.reranker_id = reranker_id
+        self.reranker_id = (
+            require_uuid(reranker_id, "reranker_id", hint=_NO_RERANKER_HINT)
+            if reranker_id is not None
+            else None
+        )
         self.min_score = min_score
-        self.metadata_filter = dict(metadata_filter or {})
+        # Resolved now so a bad filter fails at construction rather than on
+        # the first search; resolved again at use, as it is public.
+        resolve_filter(metadata_filter)
+        self.metadata_filter: dict[str, Any] | str = (
+            dict(metadata_filter)
+            if isinstance(metadata_filter, dict)
+            else metadata_filter or {}
+        )
         self.allow_write = allow_write
         self.allow_admin_tools = allow_admin_tools
         self.allow_delete = allow_delete
@@ -223,17 +257,38 @@ class GoodMemToolkit(BaseToolkit):
     # ------------------------------------------------------------------
 
     def _require_spaces(self) -> list[str]:
-        r"""Returns the configured spaces, or raises if there are none."""
+        r"""Returns the configured spaces as canonical UUIDs.
+
+        Raises:
+            GoodMemError: If no space is configured.
+            GoodMemIdError: If a configured space id is not a UUID.
+        """
         if not self.space_ids:
             raise GoodMemError(
                 "No space is configured. Construct the toolkit with "
                 "space_ids=[...] so reads and writes have a destination."
             )
-        return self.space_ids
+        return [
+            require_uuid(space_id, f"space_ids[{i}]")
+            for i, space_id in enumerate(self.space_ids)
+        ]
 
-    def _space_keys(self) -> list[dict[str, Any]]:
-        r"""Builds the ``spaceKeys`` payload, including any metadata filter."""
-        expression = from_mapping(self.metadata_filter)
+    def _require_reranker(self) -> str | None:
+        r"""Returns the configured reranker as a canonical UUID, if any."""
+        if self.reranker_id is None:
+            return None
+        return require_uuid(
+            self.reranker_id, "reranker_id", hint=_NO_RERANKER_HINT
+        )
+
+    def _space_keys(self, narrow: str = "") -> list[dict[str, Any]]:
+        r"""Builds the ``spaceKeys`` payload, including any metadata filter.
+
+        Args:
+            narrow (str): A further expression that must also match, combined
+                with the toolkit's own filter by ``AND``. (default: ``""``)
+        """
+        expression = all_of(resolve_filter(self.metadata_filter), narrow)
         keys: list[dict[str, Any]] = []
         for space_id in self._require_spaces():
             key: dict[str, Any] = {"spaceId": space_id}
@@ -242,37 +297,45 @@ class GoodMemToolkit(BaseToolkit):
             keys.append(key)
         return keys
 
-    def _retrieve(self, query: str, top_k: int) -> RetrievalOutcome:
+    def _retrieve(
+        self, query: str, top_k: int, *, narrow: str = ""
+    ) -> RetrievalOutcome:
         r"""Runs one retrieval and folds the stream into an outcome.
 
         Args:
             query (str): The natural-language query.
             top_k (int): How many chunks to ask the server for.
+            narrow (str): A further filter expression, ANDed with the
+                toolkit's own. (default: ``""``)
 
         Returns:
             RetrievalOutcome: The hits and any statuses the server reported.
         """
+        reranker_id = self._require_reranker()
         kwargs: dict[str, Any] = {
             "message": query,
-            "space_keys": self._space_keys(),
+            "space_keys": self._space_keys(narrow),
             "requested_size": top_k,
             "fetch_memory": True,
         }
-        if self.reranker_id:
-            kwargs["reranker_id"] = self.reranker_id
+        if reranker_id:
+            kwargs["reranker_id"] = reranker_id
 
         try:
             stream = self._client.memories.retrieve(**kwargs)
             with stream as events:
                 outcome = outcome_from_events(
-                    events, reranked=bool(self.reranker_id)
+                    events, reranked=bool(reranker_id)
                 )
         except GoodMemError:
             raise
         except Exception as exc:
             raise _wrap_api_error(exc, "Retrieval") from exc
 
-        if self.min_score is not None and self.reranker_id:
+        # A reranker threshold applies only to reranker scores. When the
+        # reranker failed the server returns vector hits instead; applying
+        # the threshold to those would discard what the server returned.
+        if self.min_score is not None and outcome.reranked:
             kept = [
                 h
                 for h in outcome.hits
@@ -410,7 +473,7 @@ class GoodMemToolkit(BaseToolkit):
     # ------------------------------------------------------------------
 
     def get_memory(
-        self, memory_id: str, include_content: bool = False
+        self, memory_id: UuidStr, include_content: bool = False
     ) -> dict[str, Any]:
         r"""Fetches one memory by id, optionally with its original content.
 
@@ -427,6 +490,7 @@ class GoodMemToolkit(BaseToolkit):
             Dict[str, Any]: A dictionary with ``success``, ``memory`` and,
                 when requested, ``content`` plus ``contentEncoding``.
         """
+        memory_id = require_uuid(memory_id, "memory_id")
         try:
             memory = self._client.memories.get(id=memory_id)
         except Exception as exc:
@@ -493,7 +557,7 @@ class GoodMemToolkit(BaseToolkit):
             for e in embedders
         ]
 
-    def create_space(self, name: str, embedder_id: str) -> dict[str, Any]:
+    def create_space(self, name: str, embedder_id: UuidStr) -> dict[str, Any]:
         r"""Creates a space, or reuses one whose embedder already matches.
 
         A space cannot change embedder after creation, so reusing a space by
@@ -503,7 +567,7 @@ class GoodMemToolkit(BaseToolkit):
 
         Args:
             name (str): The space name.
-            embedder_id (str): The embedder the space must use.
+            embedder_id (str): The UUID of the embedder the space must use.
 
         Returns:
             Dict[str, Any]: A dictionary with ``success``, ``spaceId``,
@@ -513,6 +577,7 @@ class GoodMemToolkit(BaseToolkit):
             GoodMemError: If a space of that name exists with a different
                 embedder, or if several spaces share the name.
         """
+        embedder_id = require_uuid(embedder_id, "embedder_id")
         try:
             existing = [
                 s
@@ -564,7 +629,7 @@ class GoodMemToolkit(BaseToolkit):
             "reused": False,
         }
 
-    def goodmem_get_space(self, space_id: str) -> dict[str, Any]:
+    def goodmem_get_space(self, space_id: UuidStr) -> dict[str, Any]:
         r"""Fetches one space by id.
 
         Args:
@@ -574,6 +639,7 @@ class GoodMemToolkit(BaseToolkit):
             dict[str, Any]: The space, with ``spaceId``, ``name``,
                 ``embedderIds`` and ``labels``.
         """
+        space_id = require_uuid(space_id, "space_id")
         try:
             space = self._client.spaces.get(id=space_id)
         except Exception as exc:
@@ -588,7 +654,7 @@ class GoodMemToolkit(BaseToolkit):
 
     def update_space(
         self,
-        space_id: str,
+        space_id: UuidStr,
         name: str | None = None,
         labels: dict[str, str] | None = None,
         replace_labels: bool = False,
@@ -610,6 +676,7 @@ class GoodMemToolkit(BaseToolkit):
             dict[str, Any]: A dictionary with ``success``, ``spaceId`` and
                 ``name``.
         """
+        space_id = require_uuid(space_id, "space_id")
         request: dict[str, Any] = {}
         if name is not None:
             request["name"] = name
@@ -630,7 +697,7 @@ class GoodMemToolkit(BaseToolkit):
             "name": str(getattr(space, "name", "") or ""),
         }
 
-    def delete_space(self, space_id: str) -> dict[str, Any]:
+    def delete_space(self, space_id: UuidStr) -> dict[str, Any]:
         r"""Permanently deletes a space and every memory in it.
 
         Args:
@@ -639,6 +706,7 @@ class GoodMemToolkit(BaseToolkit):
         Returns:
             dict[str, Any]: A dictionary with ``success`` and ``spaceId``.
         """
+        space_id = require_uuid(space_id, "space_id")
         try:
             self._client.spaces.delete(id=space_id)
         except Exception as exc:
@@ -646,20 +714,25 @@ class GoodMemToolkit(BaseToolkit):
         return {"success": True, "spaceId": space_id}
 
     def list_memories(
-        self, space_id: str | None = None
+        self, space_id: UuidStr | None = None
     ) -> list[dict[str, Any]]:
         r"""Lists memories in a space, following pagination.
 
         Args:
-            space_id (str | None): The space to list. Defaults to the first
-                configured space. (default: :obj:`None`)
+            space_id (str | None): The UUID of the space to list. Defaults to
+                the first configured space. (default: :obj:`None`)
 
         Returns:
             list[dict[str, Any]]: Memory records with ``memoryId``,
                 ``spaceId``, ``contentType``, ``processingStatus`` and
                 ``metadata``.
         """
-        target = space_id or self._require_spaces()[0]
+        # An empty string is a malformed id, not a request for the default.
+        target = (
+            self._require_spaces()[0]
+            if space_id is None
+            else require_uuid(space_id, "space_id")
+        )
         try:
             page = self._client.memories.list(
                 space_id=target, max_items=self.max_list_items
@@ -680,7 +753,7 @@ class GoodMemToolkit(BaseToolkit):
             for m in memories
         ]
 
-    def delete_memory(self, memory_id: str) -> dict[str, Any]:
+    def delete_memory(self, memory_id: UuidStr) -> dict[str, Any]:
         r"""Permanently deletes a memory and everything derived from it.
 
         Args:
@@ -689,6 +762,7 @@ class GoodMemToolkit(BaseToolkit):
         Returns:
             Dict[str, Any]: A dictionary with ``success`` and ``memoryId``.
         """
+        memory_id = require_uuid(memory_id, "memory_id")
         try:
             self._client.memories.delete(id=memory_id)
         except Exception as exc:

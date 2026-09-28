@@ -36,6 +36,15 @@ from camel_goodmem._uploads import (
 FIXTURES = Path(__file__).parent / "goodmem_fixtures"
 BASE = "https://goodmem.test"
 
+# GoodMem ids are UUIDs, and the toolkit refuses anything else before a
+# request is made, so every id a test hands the toolkit is a real-shaped one.
+SPACE = "01a0d44b-746f-775b-b91e-bc73d4058e27"
+MEMORY = "01a0d44b-748d-72eb-b54e-c3ea2d956927"
+RERANKER = "019cfd1d-5b7e-7a41-9c3d-2f0e8a6b4c11"
+EMB_VOYAGE = "019cfd1c-c033-7517-b7de-f73941a0464b"
+EMB_QWEN = "019cfd1c-d2a8-7f40-8e6b-91c4a7d3e052"
+SPACE_2 = "01a0d44b-96ae-7081-bc16-5644e701222a"
+
 
 def fixture(name: str) -> bytes:
     return (FIXTURES / name).read_bytes()
@@ -52,7 +61,7 @@ def make_toolkit(handler, **kwargs) -> GoodMemToolkit:
             headers={"X-API-Key": "gm_offline_test_key"},
         ),
     )
-    kwargs.setdefault("space_ids", ["space-1"])
+    kwargs.setdefault("space_ids", [SPACE])
     return GoodMemToolkit(
         base_url=BASE, api_key="gm_offline_test_key", client=client, **kwargs
     )
@@ -211,7 +220,7 @@ class TestTimeouts:
         from goodmem import Goodmem
 
         tk = GoodMemToolkit(
-            base_url=BASE, api_key="k", space_ids=["s"], timeout=12.5
+            base_url=BASE, api_key="k", space_ids=[SPACE], timeout=12.5
         )
         assert isinstance(tk._client, Goodmem)
         assert tk._owns_client is True
@@ -298,12 +307,91 @@ class TestScoreSemantics:
     def test_min_score_warns_and_names_the_range_when_it_empties(self):
         tk = make_toolkit(
             retrieve_handler(fixture("retrieve_ok.ndjson")),
-            reranker_id="rr-1",
+            reranker_id=RERANKER,
             min_score=99.0,
         )
         with pytest.warns(UserWarning, match="observed scores ranged"):
             result = tk.goodmem_search("canary")
         assert result["totalResults"] == 0
+
+    def test_reranker_failure_hits_are_vector_scored_and_negated(self):
+        """With a reranker configured the server answered RERANKING_FAILED
+        and NOT_FOUND and fell back to vector hits (raw -0.5846). 0.2.1
+        labelled them "reranker" from configuration, leaving the distance
+        un-negated as score -0.5846."""
+        tk = make_toolkit(
+            retrieve_handler(fixture("retrieve_degraded_hits.ndjson")),
+            reranker_id=RERANKER,
+        )
+        result = tk.goodmem_search("canary")
+        hit = result["results"][0]
+        assert hit["rawScore"] < 0
+        assert hit["scoreKind"] == "vector"
+        assert hit["score"] == pytest.approx(-hit["rawScore"])
+        assert result["partial"] is True
+        codes = {s["code"] for s in result["statuses"]}
+        assert {"NOT_FOUND", "RERANKING_FAILED"} <= codes
+
+    def test_reranker_threshold_does_not_discard_fallback_hits(self, recwarn):
+        """Q4a: min_score is a reranker threshold; applied to the vector
+        fallback it removed every hit the server returned."""
+        tk = make_toolkit(
+            retrieve_handler(fixture("retrieve_degraded_hits.ndjson")),
+            reranker_id=RERANKER,
+            min_score=0.9,
+        )
+        result = tk.goodmem_search("canary")
+        assert result["totalResults"] == 1
+        assert result["partial"] is True
+        assert not [w for w in recwarn if "min_score" in str(w.message)]
+
+    def test_retriever_reports_fallback_hits_as_vector(self):
+        tk = make_toolkit(
+            retrieve_handler(fixture("retrieve_degraded_hits.ndjson")),
+            reranker_id=RERANKER,
+        )
+        rows = GoodMemRetriever(tk).query("canary", similarity_threshold=0.0)
+        assert len(rows) == 1
+        extra = rows[0]["extra_info"]
+        assert extra["goodmem_score_kind"] == "vector"
+        assert float(rows[0]["similarity score"]) > 0
+        assert extra["goodmem_partial"] is True
+
+    def test_reranking_failed_after_the_hits_still_counts(self):
+        events = [
+            _chunk("c1", "alpha", "mem-A", -0.2715),
+            {"status": {"code": "RERANKING_FAILED", "message": "boom"}},
+        ]
+        outcome = outcome_from_events(_as_models(events), reranked=True)
+        assert outcome.reranked is False
+        assert outcome.hits[0].score_kind == "vector"
+        assert outcome.hits[0].score == pytest.approx(0.2715)
+        assert outcome.partial is True
+
+    def test_reranker_not_found_alone_means_not_reranked(self):
+        events = [
+            {
+                "status": {
+                    "code": "NOT_FOUND",
+                    "message": "Reranker not found: x",
+                    "details": {"reranker_id": RERANKER},
+                }
+            },
+            _chunk("c1", "alpha", "mem-A", -0.5947),
+        ]
+        outcome = outcome_from_events(_as_models(events), reranked=True)
+        assert outcome.reranked is False
+        assert outcome.hits[0].score == pytest.approx(0.5947)
+
+    def test_an_unrelated_problem_keeps_reranker_scores(self):
+        events = [
+            {"status": {"code": "SOME_FUTURE_CODE", "message": "odd"}},
+            _chunk("c1", "alpha", "mem-A", 0.87),
+        ]
+        outcome = outcome_from_events(_as_models(events), reranked=True)
+        assert outcome.reranked is True
+        assert outcome.hits[0].score_kind == "reranker"
+        assert outcome.hits[0].score == pytest.approx(0.87)
 
     def test_no_threshold_is_sent_by_default(self):
         capture = {}
@@ -408,6 +496,112 @@ class TestFilters:
 
 
 # ---------------------------------------------------------------------------
+# metadata_filter accepts a `filters` expression, not only a mapping
+# ---------------------------------------------------------------------------
+
+#: The expression the README builds. 0.2.1 took only a dict, so passing this
+#: raised ``ValueError: dictionary update sequence element #0 has length 1``
+#: and compare / one_of / not_equals / any_of could not be applied at all.
+README_EXPRESSION = filters.all_of(
+    filters.equals("tenant", "acme"),
+    filters.compare("year", ">=", 2026),
+    filters.one_of("kind", ["note", "doc"]),
+)
+
+
+class TestFilterExpressions:
+    def _search_filter(self, **kwargs):
+        capture: dict = {}
+        tk = make_toolkit(
+            retrieve_handler(fixture("retrieve_ok.ndjson"), capture=capture),
+            **kwargs,
+        )
+        tk.goodmem_search("q")
+        return [k.get("filter") for k in capture["body"]["spaceKeys"]]
+
+    def test_toolkit_sends_a_filters_expression_verbatim(self):
+        sent = self._search_filter(
+            space_ids=[SPACE, SPACE_2], metadata_filter=README_EXPRESSION
+        )
+        assert sent == [README_EXPRESSION, README_EXPRESSION]
+
+    def test_every_filters_builder_reaches_the_request(self):
+        expression = filters.any_of(
+            filters.not_equals("status", "archived"),
+            filters.compare("score", "<", 3),
+        )
+        assert self._search_filter(metadata_filter=expression) == [expression]
+
+    def test_a_mapping_still_builds_an_and_of_equalities(self):
+        sent = self._search_filter(metadata_filter={"active": True, "n": 2})
+        assert sent == [
+            "(CAST(val('$.active') AS BOOLEAN) = true) AND "
+            "(CAST(val('$.n') AS NUMERIC) = 2)"
+        ]
+
+    def test_an_empty_expression_sends_no_filter(self):
+        assert self._search_filter(metadata_filter="") == [None]
+        assert self._search_filter(metadata_filter=filters.all_of()) == [None]
+
+    def test_other_types_are_refused_at_construction(self):
+        with pytest.raises(GoodMemFilterError, match="metadata_filter"):
+            make_toolkit(retrieve_handler(b""), metadata_filter=["tenant"])
+
+    def test_a_bad_mapping_value_is_refused_at_construction(self):
+        with pytest.raises(GoodMemFilterError, match="Unsupported filter"):
+            make_toolkit(retrieve_handler(b""), metadata_filter={"x": None})
+
+    def test_the_model_still_cannot_supply_a_filter(self):
+        tk = make_toolkit(
+            retrieve_handler(b""), metadata_filter=README_EXPRESSION
+        )
+        props = tk.get_tools()[0].get_openai_tool_schema()["function"][
+            "parameters"
+        ]["properties"]
+        assert set(props) == {"query", "top_k"}
+
+    def test_retriever_accepts_a_filters_expression(self):
+        capture: dict = {}
+        tk = make_toolkit(
+            retrieve_handler(fixture("retrieve_ok.ndjson"), capture=capture)
+        )
+        GoodMemRetriever(tk, metadata_filter=README_EXPRESSION).query("q")
+        key = capture["body"]["spaceKeys"][0]
+        assert key["filter"] == README_EXPRESSION
+
+    def test_retriever_accepts_a_mapping(self):
+        capture: dict = {}
+        tk = make_toolkit(
+            retrieve_handler(fixture("retrieve_ok.ndjson"), capture=capture)
+        )
+        GoodMemRetriever(tk, metadata_filter={"tenant": "acme"}).query("q")
+        key = capture["body"]["spaceKeys"][0]
+        assert key["filter"] == "CAST(val('$.tenant') AS TEXT) = 'acme'"
+
+    def test_retriever_filter_narrows_the_toolkit_filter_never_widens(self):
+        capture: dict = {}
+        tk = make_toolkit(
+            retrieve_handler(fixture("retrieve_ok.ndjson"), capture=capture),
+            metadata_filter={"tenant": "acme"},
+        )
+        narrow = filters.compare("year", ">=", 2026)
+        GoodMemRetriever(tk, metadata_filter=narrow).query("q")
+        assert capture["body"]["spaceKeys"][0]["filter"] == (
+            f"(CAST(val('$.tenant') AS TEXT) = 'acme') AND ({narrow})"
+        )
+        # The toolkit's own searches keep only the toolkit's filter.
+        tk.goodmem_search("q")
+        assert capture["body"]["spaceKeys"][0]["filter"] == (
+            "CAST(val('$.tenant') AS TEXT) = 'acme'"
+        )
+
+    def test_retriever_refuses_other_types_at_construction(self):
+        tk = make_toolkit(retrieve_handler(b""))
+        with pytest.raises(GoodMemFilterError, match="metadata_filter"):
+            GoodMemRetriever(tk, metadata_filter=42)
+
+
+# ---------------------------------------------------------------------------
 # P32 -- embedder reuse
 # ---------------------------------------------------------------------------
 
@@ -444,31 +638,31 @@ class TestSpaceReuse:
 
     def test_reuse_requires_a_matching_embedder(self):
         tk = make_toolkit(
-            self._spaces_handler([_space("s-1", "notes", ["emb-voyage"])])
+            self._spaces_handler([_space(SPACE, "notes", [EMB_VOYAGE])])
         )
         with pytest.raises(GoodMemError) as err:
-            tk.create_space("notes", "emb-qwen")
-        assert "emb-voyage" in str(err.value)
-        assert "emb-qwen" in str(err.value)
+            tk.create_space("notes", EMB_QWEN)
+        assert EMB_VOYAGE in str(err.value)
+        assert EMB_QWEN in str(err.value)
 
     def test_reuse_succeeds_when_the_embedder_matches(self):
         tk = make_toolkit(
-            self._spaces_handler([_space("s-1", "notes", ["emb-voyage"])])
+            self._spaces_handler([_space(SPACE, "notes", [EMB_VOYAGE])])
         )
-        out = tk.create_space("notes", "emb-voyage")
-        assert out["reused"] is True and out["spaceId"] == "s-1"
+        out = tk.create_space("notes", EMB_VOYAGE)
+        assert out["reused"] is True and out["spaceId"] == SPACE
 
     def test_an_ambiguous_name_is_an_error_not_a_coin_flip(self):
         tk = make_toolkit(
             self._spaces_handler(
                 [
-                    _space("s-1", "notes", ["emb-voyage"]),
-                    _space("s-2", "notes", ["emb-voyage"]),
+                    _space(SPACE, "notes", [EMB_VOYAGE]),
+                    _space(SPACE_2, "notes", [EMB_VOYAGE]),
                 ]
             )
         )
         with pytest.raises(GoodMemError, match="refusing to guess"):
-            tk.create_space("notes", "emb-voyage")
+            tk.create_space("notes", EMB_VOYAGE)
 
 
 # ---------------------------------------------------------------------------
@@ -539,14 +733,14 @@ class TestContent:
 
     def test_text_content_is_returned_as_text(self):
         tk = make_toolkit(self._handler(b"hello there", "text/plain"))
-        out = tk.get_memory("m-1", include_content=True)
+        out = tk.get_memory(MEMORY, include_content=True)
         assert out["content"] == "hello there"
         assert out["contentEncoding"] == "text"
 
     def test_binary_content_is_returned_as_base64_not_mangled(self):
         pdf = b"%PDF-1.4\x00\x01\x02\xff\xfe"
         tk = make_toolkit(self._handler(pdf, "application/pdf"))
-        out = tk.get_memory("m-1", include_content=True)
+        out = tk.get_memory(MEMORY, include_content=True)
         import base64
 
         assert base64.b64decode(out["content"]) == pdf
@@ -557,11 +751,11 @@ class TestContent:
             self._handler(b'{"message":"gone"}', "application/json", 404)
         )
         with pytest.raises(GoodMemError):
-            tk.get_memory("m-1", include_content=True)
+            tk.get_memory(MEMORY, include_content=True)
 
     def test_content_is_not_fetched_unless_asked_for(self):
         tk = make_toolkit(self._handler(b"x", "text/plain"))
-        out = tk.get_memory("m-1")
+        out = tk.get_memory(MEMORY)
         assert "content" not in out
 
 
@@ -628,13 +822,13 @@ class TestSurfaceAndSafety:
             ),
         )
         tk = GoodMemToolkit(
-            base_url=BASE, api_key="k", client=client, space_ids=["s"]
+            base_url=BASE, api_key="k", client=client, space_ids=[SPACE]
         )
         tk.close()
         assert tk._owns_client is False
         # still usable after the toolkit was closed
         tk2 = GoodMemToolkit(
-            base_url=BASE, api_key="k", client=client, space_ids=["s"]
+            base_url=BASE, api_key="k", client=client, space_ids=[SPACE]
         )
         assert tk2._client is client
 
@@ -698,7 +892,7 @@ class TestPublishedPackageRegressions:
             return httpx.Response(200, json=memory)
 
         tk = make_toolkit(handler)
-        out = tk.get_memory("m-1", include_content=True)
+        out = tk.get_memory(MEMORY, include_content=True)
         _json.dumps(out)  # would raise on bytes
         assert isinstance(out["content"], str)
 

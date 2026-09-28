@@ -243,3 +243,37 @@ def from_mapping(metadata: dict[str, Any]) -> str:
     if not metadata:
         return ""
     return all_of(*(equals(k, v) for k, v in sorted(metadata.items())))
+
+
+def resolve_filter(
+    value: "dict[str, Any] | str | None", name: str = "metadata_filter"
+) -> str:
+    r"""Returns the filter expression a configured ``metadata_filter`` means.
+
+    A mapping is the convenience form -- an ``AND`` of equalities built by
+    :func:`from_mapping`. A string is an expression the developer built with
+    this module (``all_of``, ``compare``, ``one_of`` ...) and is used
+    verbatim. The model never supplies either.
+
+    Args:
+        value (Union[Dict[str, Any], str, None]): The configured filter.
+        name (str): The argument name, for the error message.
+            (default: :obj:`"metadata_filter"`)
+
+    Returns:
+        str: The expression to send, or ``""`` for no filter.
+
+    Raises:
+        GoodMemFilterError: If ``value`` is neither a mapping nor a string, or
+            a mapping value has no safe representation.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value if value.strip() else ""
+    if isinstance(value, dict):
+        return from_mapping(value)
+    raise GoodMemFilterError(
+        f"{name} must be a dict of field/value pairs or an expression built "
+        f"with camel_goodmem.filters, not {type(value).__name__}."
+    )

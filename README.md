@@ -5,7 +5,7 @@ agents. Documents are chunked, embedded and searched server-side; this package
 wraps the official `goodmem` Python SDK and exposes it to CAMEL both as a
 toolkit and as a `BaseRetriever`.
 
-**Version 0.2.0.** Verified against GoodMem server **v1.0.320**.
+**Version 0.2.1.** Verified against GoodMem server **v1.0.320**.
 
 > **Upgrading from 0.1.0.** 0.1.0 talked to GoodMem over hand-written HTTP and
 > had defects that were invisible from its return values — a failed search
@@ -18,6 +18,10 @@ toolkit and as a `BaseRetriever`.
 ```bash
 pip install camel-goodmem
 ```
+
+Requires Python 3.10+, `camel-ai>=0.2.79`, `goodmem>=0.1.35`,
+`pydantic>=2.11` and `mcp<2`. CI installs exactly those floors and runs the
+offline suite against them.
 
 ```bash
 export GOODMEM_API_KEY="gm_your_key_here"
@@ -54,6 +58,23 @@ Opt in to more:
 | `allow_admin_tools=True` | `list_spaces`, `list_embedders`, `goodmem_get_space`, `create_space`, `update_space`, `list_memories`, `get_memory` |
 | `allow_delete=True` | `delete_memory`, `delete_space` |
 | `allow_write=False` | removes `goodmem_remember` |
+
+### Ids must be UUIDs
+
+Every GoodMem id this package handles — the `space_ids` and `reranker_id` you
+configure, and the `memory_id`, `space_id` and `embedder_id` a tool or method
+takes — must be a UUID. Anything else raises `GoodMemIdError`, naming the
+argument, **before any request is made**, because the GoodMem SDK puts ids
+into request paths unescaped: `delete_memory("../spaces/<id>")` would
+otherwise send `DELETE /v1/spaces/<id>` and delete a whole space. Upper-case
+UUIDs are accepted and sent lower-case. The tool schemas declare these
+arguments with the same UUID pattern, so the model is told up front.
+
+An empty string is not a UUID either: for no reranker, pass
+`reranker_id=None` or leave it out. `reranker_id=""` meant "no reranker" in
+0.2.0 and is now refused at construction, so
+`reranker_id=os.getenv("GOODMEM_RERANKER_ID", "")` fails at startup — write
+`os.getenv("GOODMEM_RERANKER_ID") or None`.
 
 ## Retrieval results
 
@@ -95,37 +116,65 @@ GoodMem produces two kinds of score, and they are not comparable:
   scale. Measured live on the same five documents: Voyage `rerank-2.5` returned
   `0.27..0.93`, Jina `jina-reranker-v3` returned `-0.14..0.43`.
 
-So there is **no default threshold**, and `min_score` applies only when
-`reranker_id` is set. If a threshold removes everything, the toolkit warns and
+So there is **no default threshold**, and `min_score` applies only to
+reranker scores. If a threshold removes everything, the toolkit warns and
 names the range it actually saw rather than returning a silent empty list.
+
+`scoreKind` says what the server actually did, not what was configured. When
+a reranker is set but fails, the server reports `RERANKING_FAILED` (and
+`NOT_FOUND` for a missing reranker) and still returns the vector-stage hits.
+Those hits are `scoreKind: "vector"`, flipped like any vector score, and
+`min_score` is not applied to them, so a reranker threshold cannot discard
+them; `partial` is set and `statuses` carries both codes.
 
 ## Metadata filters
 
-Filters are expressions evaluated server-side, not SQL. Build them with the
-`filters` helper — in 0.1.0 the filter was a raw string the *model* supplied,
-which let it widen its own scope and broke on any value containing an
-apostrophe:
+Filters are expressions evaluated server-side, not SQL. You set them when you
+construct the toolkit or the retriever; the model never supplies one — in
+0.1.0 the filter was a raw string the *model* supplied, which let it widen its
+own scope and broke on any value containing an apostrophe.
+
+`metadata_filter` takes either form:
+
+- a **dict** — every pair must match (an `AND` of equalities);
+- a **string** built with the `filters` helper — `equals`, `not_equals`,
+  `compare`, `one_of`, combined with `all_of` / `any_of` — sent verbatim.
 
 ```python
-from camel_goodmem import GoodMemToolkit, filters
+from camel_goodmem import GoodMemRetriever, GoodMemToolkit, filters
 
+# dict: tenant == "acme" AND active == true
 toolkit = GoodMemToolkit(
-    space_ids=["..."],
+    space_ids=["<space-uuid>"],
     metadata_filter={"tenant": "acme", "active": True},
 )
 
+# expression: anything the dict form cannot say
 expression = filters.all_of(
     filters.equals("tenant", "acme"),
     filters.compare("year", ">=", 2026),
     filters.one_of("kind", ["note", "doc"]),
 )
+toolkit = GoodMemToolkit(space_ids=["<space-uuid>"], metadata_filter=expression)
+result = toolkit.goodmem_search("quarterly plan")
+
+# the retriever takes the same argument; it is ANDed with the toolkit's
+# filter, so a retriever can narrow the toolkit's scope but never widen it
+retriever = GoodMemRetriever(
+    toolkit,
+    metadata_filter=filters.not_equals("status", "archived"),
+)
+rows = retriever.query("quarterly plan", top_k=5)
 ```
 
 The helper applies the escaping the server accepts (`'` → `\'`, `\` → `\\`;
 SQL-style `''` doubling is rejected with HTTP 400), refuses control characters,
 restricts field names, and casts each value to the type GoodMem stored. A
 boolean compared as `TEXT` is accepted with HTTP 200 and matches nothing, so
-`filters` never stringifies a bool.
+neither `filters` nor the dict form ever stringifies a bool; a `None`, list or
+dict value is refused with `GoodMemFilterError` when the toolkit is
+constructed. A string is sent as written, so build it with `filters` rather
+than by hand.
 
 ## Uploads
 
@@ -134,7 +183,11 @@ resolved — symlinks included — and refused if it lands outside that director
 so a model-supplied path cannot read arbitrary files from the host.
 
 ```python
-toolkit = GoodMemToolkit(space_ids=["..."], upload_dir="/srv/agent-uploads")
+from camel_goodmem import GoodMemToolkit
+
+toolkit = GoodMemToolkit(
+    space_ids=["<space-uuid>"], upload_dir="/srv/agent-uploads"
+)
 ```
 
 ## Retriever
@@ -142,7 +195,7 @@ toolkit = GoodMemToolkit(space_ids=["..."], upload_dir="/srv/agent-uploads")
 ```python
 from camel_goodmem import GoodMemRetriever, GoodMemToolkit
 
-retriever = GoodMemRetriever(GoodMemToolkit(space_ids=["..."]))
+retriever = GoodMemRetriever(GoodMemToolkit(space_ids=["<space-uuid>"]))
 retriever.process("Text to remember.")
 rows = retriever.query("what did I store?", top_k=5)
 ```
@@ -164,6 +217,22 @@ toolkit = GoodMemToolkit(client=Goodmem(base_url=..., api_key=...))
 
 An injected client keeps its own server, credentials and TLS settings, and is
 never closed by the toolkit.
+
+## Changes in 0.2.1
+
+Measured against a local server that records every request line, driving the
+real SDK and `httpx`:
+
+| Was (0.2.0) | Now |
+| --- | --- |
+| `delete_memory("../spaces/<id>")` sent `DELETE /v1/spaces/<id>` and returned `{"success": True}`; the same traversal reached `delete_space`, `update_space`, `goodmem_get_space`, `get_memory` and `list_memories` | Refused with `GoodMemIdError` naming the argument; nothing is sent |
+| `%2e%2e/…`, `..%2F…`, a leading space, `?x=1` and `#frag` after an id all reached the server; `list_memories("<id>#frag")` requested a different endpoint, `GET /v1/spaces/<id>` | Only a canonical UUID is accepted |
+| `list_memories("")` silently listed the configured space | Refused |
+| A malformed `space_ids` or `reranker_id` was sent as-is, and `list_memories()` put the configured space id in a URL path | Refused at construction, and again at every use |
+| `reranker_id=""` meant "no reranker" | **Refused** with `GoodMemIdError` at construction; the message says to pass `reranker_id=None` |
+| Declared `camel-ai>=0.2.0` and `pydantic>=2`, neither true: camel-ai 0.2.0/0.2.10 fail to import this package (`No module named 'camel.logger'`), 0.2.20/0.2.59 fail on camel-ai's own undeclared `PIL`, and 0.2.60–0.2.78 import it but turn every exception a method raises into `IndexError` (245 of 466 offline tests fail; `delete_memory("../spaces/<id>")` raised `IndexError`, not `GoodMemIdError`). On Python 3.10 pydantic 2.10 made `get_tools()` raise `TypeError` | `camel-ai>=0.2.79`, `pydantic>=2.11` (`mcp<2` kept); a CI `floors` job installs them with `--resolution lowest-direct`, checks the installed versions equal the declared floors, imports the package and runs the offline suite |
+| With `reranker_id` set and the reranker failing, the server's vector fallback hits (raw `-0.5846`) were labelled `scoreKind: "reranker"` from configuration and left un-negated (`score: -0.5846`); `min_score=0.0` then removed every hit the server returned | `scoreKind`/orientation come from the response: `RERANKING_FAILED` or a reranker `NOT_FOUND` means `vector`, `score: 0.5846`, `min_score` skipped, the hit kept, `partial: true` with both statuses |
+| `metadata_filter` took only a dict, so the expression this README built with `filters` raised `ValueError: dictionary update sequence element #0 has length 1; 2 is required`, and `compare` / `one_of` / `not_equals` / `any_of` could not be applied at all; `GoodMemRetriever` took no filter | `metadata_filter` is `dict` or a `filters` expression string (sent verbatim) on the toolkit and the retriever; the retriever's is ANDed with the toolkit's. A bad filter fails at construction |
 
 ## Changes in 0.2.0
 
@@ -194,14 +263,15 @@ against GoodMem v1.0.320.
 
 | Suite | Count | Needs |
 | --- | --- | --- |
-| `tests/test_goodmem_toolkit.py` | 69 | nothing — the real SDK over a mock transport, fed NDJSON captured from a live server |
-| `tests/test_goodmem_live.py` | 29 | `GOODMEM_API_KEY` + `GOODMEM_BASE_URL`; skips entirely without them |
+| `tests/test_goodmem_toolkit.py` | 86 | nothing — the real SDK over a mock transport, fed NDJSON captured from a live server |
+| `tests/test_goodmem_ids.py` | 380 | nothing — the real SDK and `httpx` against a local server that records every request; every id-taking entry point (method, CAMEL tool, MCP tool, configuration) × ten malformed ids must send nothing, and a `str` or `uuid.UUID` subclass cannot change the id after it is checked. It also runs the live tests that depend on the id check against that server, and fails if any other live test passes an id the check would refuse |
+| `tests/test_goodmem_live.py` | 30 | `GOODMEM_API_KEY` + `GOODMEM_BASE_URL`; skips entirely without them |
 
 ```bash
 pip install -e ".[dev]"
 
 # offline
-pytest tests/test_goodmem_toolkit.py
+pytest tests/test_goodmem_toolkit.py tests/test_goodmem_ids.py
 
 # live (pin the embedder if the server's first one is unhealthy)
 GOODMEM_API_KEY=... GOODMEM_BASE_URL=... \
@@ -212,6 +282,12 @@ GOODMEM_API_KEY=... GOODMEM_BASE_URL=... \
 ruff check camel_goodmem tests
 ruff format --check camel_goodmem tests
 mypy camel_goodmem
+
+# ...and the declared floors, on Python 3.10
+uv venv --python 3.10 floor
+uv pip install --python floor/bin/python --resolution lowest-direct -e .
+uv pip install --python floor/bin/python pytest pytest-timeout
+floor/bin/python -m pytest tests/test_goodmem_toolkit.py tests/test_goodmem_ids.py
 ```
 
 The live suite creates one space per run and asserts, against a fresh server
