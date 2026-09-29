@@ -1,7 +1,7 @@
 r"""Shared handling of a GoodMem retrieval stream.
 
-Both :class:`~camel_goodmem.GoodMemToolkit` and
-:class:`~camel_goodmem.GoodMemRetriever` consume retrieval through this
+Both :class:`~goodmem_camel.GoodMemToolkit` and
+:class:`~goodmem_camel.GoodMemRetriever` consume retrieval through this
 module, so the two cannot drift apart in how they classify a status, join a
 chunk to its memory, or orient a score.
 """

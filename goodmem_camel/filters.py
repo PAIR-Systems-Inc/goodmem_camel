@@ -3,7 +3,7 @@ r"""Public helpers for building GoodMem metadata filter expressions.
 Example:
     ::
 
-        from camel_goodmem import filters
+        from goodmem_camel import filters
 
         expression = filters.all_of(
             filters.equals("tenant", "acme"),
@@ -11,7 +11,7 @@ Example:
         )
 """
 
-from camel_goodmem._filters import (
+from goodmem_camel._filters import (
     GoodMemFilterError,
     all_of,
     any_of,

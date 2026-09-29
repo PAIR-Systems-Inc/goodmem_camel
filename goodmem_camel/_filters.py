@@ -275,5 +275,5 @@ def resolve_filter(
         return from_mapping(value)
     raise GoodMemFilterError(
         f"{name} must be a dict of field/value pairs or an expression built "
-        f"with camel_goodmem.filters, not {type(value).__name__}."
+        f"with goodmem_camel.filters, not {type(value).__name__}."
     )

@@ -29,7 +29,7 @@ from camel.agents import ChatAgent
 from camel.models import ModelFactory
 from camel.types import ModelPlatformType, ModelType
 
-from camel_goodmem import GoodMemToolkit
+from goodmem_camel import GoodMemToolkit
 
 verify_ssl = os.environ.get("GOODMEM_VERIFY_SSL", "true").lower() != "false"
 
