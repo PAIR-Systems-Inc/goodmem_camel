@@ -5,7 +5,7 @@ agents. Documents are chunked, embedded and searched server-side; this package
 wraps the official `goodmem` Python SDK and exposes it to CAMEL both as a
 toolkit and as a `BaseRetriever`.
 
-**Version 0.2.1.** Verified against GoodMem server **v1.0.320**.
+**Version 0.3.0.** Verified against GoodMem server **v1.0.320**.
 
 > **Upgrading from 0.1.0.** 0.1.0 talked to GoodMem over hand-written HTTP and
 > had defects that were invisible from its return values — a failed search
@@ -45,9 +45,9 @@ By default the model sees exactly two tools:
 | `goodmem_search` | `query`, `top_k` |
 | `goodmem_remember` | `text`, `metadata` |
 
-Every operational setting — which spaces are readable, which reranker, whether
-a threshold applies, whether files can be uploaded — is fixed by you at
-construction time. The model cannot widen its own access, pick another space,
+Every operational setting — which spaces are readable, which reranker, which
+LLM answers from the results, whether a threshold applies, whether files can be
+uploaded — is fixed by you at construction time. The model cannot widen its own access, pick another space,
 or turn on indexing waits.
 
 Opt in to more:
@@ -61,8 +61,8 @@ Opt in to more:
 
 ### Ids must be UUIDs
 
-Every GoodMem id this package handles — the `space_ids` and `reranker_id` you
-configure, and the `memory_id`, `space_id` and `embedder_id` a tool or method
+Every GoodMem id this package handles — the `space_ids`, `reranker_id` and
+`llm_id` you configure, and the `memory_id`, `space_id` and `embedder_id` a tool or method
 takes — must be a UUID. Anything else raises `GoodMemIdError`, naming the
 argument, **before any request is made**, because the GoodMem SDK puts ids
 into request paths unescaped: `delete_memory("../spaces/<id>")` would
@@ -74,7 +74,8 @@ An empty string is not a UUID either: for no reranker, pass
 `reranker_id=None` or leave it out. `reranker_id=""` meant "no reranker" in
 0.2.0 and is now refused at construction, so
 `reranker_id=os.getenv("GOODMEM_RERANKER_ID", "")` fails at startup — write
-`os.getenv("GOODMEM_RERANKER_ID") or None`.
+`os.getenv("GOODMEM_RERANKER_ID") or None`. `llm_id=""` is refused the same
+way; for no LLM, pass `llm_id=None` or leave it out.
 
 ## Retrieval results
 
@@ -96,6 +97,7 @@ An empty string is not a UUID either: for no reranker, pass
   "partial": False,           # True when the server reported a problem
   "statuses": [],             # what it reported
   "resultSetId": "...",
+  "abstractReply": "...",     # only with llm_id -- see "LLM answers"
 }
 ```
 
@@ -126,6 +128,56 @@ a reranker is set but fails, the server reports `RERANKING_FAILED` (and
 Those hits are `scoreKind: "vector"`, flipped like any vector score, and
 `min_score` is not applied to them, so a reranker threshold cannot discard
 them; `partial` is set and `statuses` carries both codes.
+
+## LLM answers
+
+GoodMem can run one of its configured LLMs over the chunks a search retrieved
+and return a grounded answer beside them. This is **off by default** and
+**set by you**, like `reranker_id`: pass the UUID of a GoodMem LLM as `llm_id`
+when you construct the toolkit. The model never sees or chooses it —
+`goodmem_search` still takes only `query` and `top_k`.
+
+```python
+from camel_goodmem import GoodMemRetriever, GoodMemToolkit
+
+toolkit = GoodMemToolkit(space_ids=["<space-uuid>"], llm_id="<llm-uuid>")
+
+result = toolkit.goodmem_search("What is the canary?")
+result["abstractReply"]   # "The canary is **ORYX-2290** ..."
+result["results"]         # the hits, exactly as without an LLM
+
+rows = GoodMemRetriever(toolkit).query("What is the canary?")
+rows[0]["extra_info"]["goodmem_abstract_reply"]   # the same answer
+```
+
+Where the answer appears:
+
+- **`goodmem_search`** (and so the tool result the model reads): the
+  `abstractReply` key, a string.
+- **`GoodMemRetriever.query()`**: `goodmem_abstract_reply` in every row's
+  `extra_info`, since CAMEL's retriever returns a plain list of rows. It is
+  one answer for the whole retrieval, repeated on each row so it survives a
+  caller keeping only some of them.
+- The key is present whenever `llm_id` is set, and absent otherwise.
+
+The id is sent as `llm_id` in the retrieval's post-processor config, beside
+`reranker_id` when both are set. It is a UUID like every other id: anything
+else raises `GoodMemIdError` before a request is made.
+
+An LLM does not rerank. Hits keep their scores, `scoreKind` and order
+exactly as without it; combine it with `reranker_id` if you want reranking
+as well.
+
+**When the LLM fails**, the search does not. The server reports
+`SUMMARIZATION_FAILED` — plus `NOT_FOUND` when no LLM has that id — and still
+returns the hits. You get the hits, `partial: True`, both statuses in
+`statuses`, a `warning`, and `abstractReply: None` (in the retriever,
+`goodmem_partial: True`, `goodmem_statuses` and `goodmem_abstract_reply:
+None`). Nothing is raised and no hit is dropped. Measured live: an LLM id
+that does not exist gave `[NOT_FOUND, SUMMARIZATION_FAILED]` with the hit
+kept; a provider out of credits gave `SUMMARIZATION_FAILED` carrying the
+provider's `429`. A reranker configured beside a failing LLM keeps its
+reranker scores.
 
 ## Metadata filters
 
@@ -203,8 +255,9 @@ rows = retriever.query("what did I store?", top_k=5)
 `query()` returns CAMEL's retriever shape — `similarity score`, `content path`,
 `metadata`, `extra_info`, `text` — with GoodMem specifics under `extra_info`
 (`goodmem_chunk_id`, `goodmem_memory_id`, `goodmem_space_id`,
-`goodmem_score_kind`, `goodmem_raw_score`, `goodmem_partial`, and
-`goodmem_statuses` when degraded).
+`goodmem_score_kind`, `goodmem_raw_score`, `goodmem_partial`,
+`goodmem_statuses` when degraded, and `goodmem_abstract_reply` when the
+toolkit has an `llm_id`).
 
 ## Bringing your own client
 
@@ -217,6 +270,17 @@ toolkit = GoodMemToolkit(client=Goodmem(base_url=..., api_key=...))
 
 An injected client keeps its own server, credentials and TLS settings, and is
 never closed by the toolkit.
+
+## Changes in 0.3.0
+
+New, opt-in: an LLM answer from the retrieved chunks. See
+[LLM answers](#llm-answers).
+
+| Was (0.2.1) | Now |
+| --- | --- |
+| No way to ask for GoodMem's LLM post-processing: `GoodMemToolkit(llm_id=...)` raised `TypeError: unexpected keyword argument 'llm_id'`, and no request carried one, so the `abstractReply` the result parser could read never arrived | `llm_id` constructor argument, checked as a UUID before any request and sent in the post-processor config; the answer is `abstractReply` on `goodmem_search` and `goodmem_abstract_reply` in the retriever's `extra_info`. Live with an OpenRouter `qwen/qwen3-8b` LLM: "The fixture canary is **ORYX-2290** ..." |
+| Not reachable: no LLM could be requested | A failing LLM keeps the hits: `partial: True`, `statuses` `[NOT_FOUND, SUMMARIZATION_FAILED]` for an id that does not exist, `[SUMMARIZATION_FAILED]` for a provider `429`, `abstractReply: None`, never an exception |
+| Not reachable | `goodmem_search(query, top_k)` is unchanged: the model cannot set or see the LLM |
 
 ## Changes in 0.2.1
 
@@ -263,9 +327,9 @@ against GoodMem v1.0.320.
 
 | Suite | Count | Needs |
 | --- | --- | --- |
-| `tests/test_goodmem_toolkit.py` | 86 | nothing — the real SDK over a mock transport, fed NDJSON captured from a live server |
-| `tests/test_goodmem_ids.py` | 380 | nothing — the real SDK and `httpx` against a local server that records every request; every id-taking entry point (method, CAMEL tool, MCP tool, configuration) × ten malformed ids must send nothing, and a `str` or `uuid.UUID` subclass cannot change the id after it is checked. It also runs the live tests that depend on the id check against that server, and fails if any other live test passes an id the check would refuse |
-| `tests/test_goodmem_live.py` | 30 | `GOODMEM_API_KEY` + `GOODMEM_BASE_URL`; skips entirely without them |
+| `tests/test_goodmem_toolkit.py` | 101 | nothing — the real SDK over a mock transport, fed NDJSON captured from a live server |
+| `tests/test_goodmem_ids.py` | 416 | nothing — the real SDK and `httpx` against a local server that records every request; every id-taking entry point (method, CAMEL tool, MCP tool, configuration) × ten malformed ids must send nothing, and a `str` or `uuid.UUID` subclass cannot change the id after it is checked. It also runs the live tests that depend on the id check against that server, and fails if any other live test passes an id the check would refuse |
+| `tests/test_goodmem_live.py` | 35 | `GOODMEM_API_KEY` + `GOODMEM_BASE_URL`; skips entirely without them. The LLM tests also take `GOODMEM_TEST_LLM_ID` (a working LLM), and optionally `GOODMEM_TEST_FAILING_LLM_ID` (one whose provider fails) and `GOODMEM_TEST_RERANKER_ID`; each skips without its id |
 
 ```bash
 pip install -e ".[dev]"
@@ -275,7 +339,7 @@ pytest tests/test_goodmem_toolkit.py tests/test_goodmem_ids.py
 
 # live (pin the embedder if the server's first one is unhealthy)
 GOODMEM_API_KEY=... GOODMEM_BASE_URL=... \
-  GOODMEM_TEST_EMBEDDER_ID=... \
+  GOODMEM_TEST_EMBEDDER_ID=... GOODMEM_TEST_LLM_ID=... \
   pytest tests/test_goodmem_live.py
 
 # what CI runs

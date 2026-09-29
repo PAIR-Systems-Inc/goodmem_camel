@@ -4,7 +4,7 @@ description = "GoodMem integration for CAMEL."
 authors = [{ name = "PAIR Systems" }]
 readme = "README.md"
 requires-python = ">=3.10"
-version = "0.2.1"
+version = "0.3.0"
 license-files = ["LICENSE"]
 urls.homepage = "https://github.com/PAIR-Systems-Inc/goodmem_camel"
 urls.source = "https://github.com/PAIR-Systems-Inc/goodmem_camel"

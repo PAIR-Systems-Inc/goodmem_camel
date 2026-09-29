@@ -44,6 +44,9 @@ RERANKER = "019cfd1d-5b7e-7a41-9c3d-2f0e8a6b4c11"
 EMB_VOYAGE = "019cfd1c-c033-7517-b7de-f73941a0464b"
 EMB_QWEN = "019cfd1c-d2a8-7f40-8e6b-91c4a7d3e052"
 SPACE_2 = "01a0d44b-96ae-7081-bc16-5644e701222a"
+LLM = "019cfd9f-0963-76f9-b069-4cde19a64ba8"
+#: The id the captured failure fixtures name: well-formed, but no such LLM.
+NO_SUCH_LLM = "00000000-0000-7000-8000-000000000000"
 
 
 def fixture(name: str) -> bytes:
@@ -971,6 +974,182 @@ class TestRetriever:
         tk = make_toolkit(retrieve_handler(_ndjson([])))
         rows = GoodMemRetriever(tk).query("nothing")
         assert rows[0]["extra_info"]["goodmem_partial"] is False
+
+
+# ---------------------------------------------------------------------------
+# LLM post-processing -- opt-in, developer-set, never a model argument
+# ---------------------------------------------------------------------------
+
+
+class TestLlmPostProcessing:
+    r"""The fixtures are live streams from GoodMem with ``llm_id`` set: a
+    working LLM, one that does not exist, one whose provider answered 429,
+    and a working reranker beside an LLM that does not exist."""
+
+    def test_the_llm_is_sent_in_the_post_processor_config(self):
+        capture = {}
+        tk = make_toolkit(
+            retrieve_handler(
+                fixture("retrieve_llm_ok.ndjson"), capture=capture
+            ),
+            llm_id=LLM,
+        )
+        tk.goodmem_search("What is the fixture canary?")
+        config = capture["body"]["postProcessor"]["config"]
+        assert config["llm_id"] == LLM
+        assert "reranker_id" not in config
+
+    def test_the_llm_sits_beside_the_reranker(self):
+        capture = {}
+        tk = make_toolkit(
+            retrieve_handler(
+                fixture("retrieve_llm_ok.ndjson"), capture=capture
+            ),
+            reranker_id=RERANKER,
+            llm_id=LLM.upper(),
+        )
+        tk.goodmem_search("q")
+        config = capture["body"]["postProcessor"]["config"]
+        assert config["llm_id"] == LLM and config["reranker_id"] == RERANKER
+
+    def test_without_an_llm_the_request_is_unchanged(self):
+        capture = {}
+        tk = make_toolkit(
+            retrieve_handler(fixture("retrieve_ok.ndjson"), capture=capture)
+        )
+        result = tk.goodmem_search("canary")
+        assert "postProcessor" not in capture["body"]
+        assert "llm" not in json.dumps(capture["body"]).lower()
+        assert "abstractReply" not in result
+
+    def test_a_malformed_llm_id_is_refused_before_any_request(self):
+        from camel_goodmem import GoodMemIdError
+
+        sent = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            sent.append(request)
+            return httpx.Response(404)
+
+        for bad in ("not-a-uuid", "", f"../llms/{LLM}", f"{LLM}\n"):
+            with pytest.raises(GoodMemIdError, match="llm_id must be a UUID"):
+                make_toolkit(handler, llm_id=bad)
+        tk = make_toolkit(handler, llm_id=LLM)
+        tk.llm_id = "not-a-uuid"
+        with pytest.raises(GoodMemIdError, match="llm_id must be a UUID"):
+            tk.goodmem_search("q")
+        assert sent == []
+
+    def test_an_empty_llm_id_says_how_to_turn_it_off(self):
+        from camel_goodmem import GoodMemIdError
+
+        with pytest.raises(GoodMemIdError, match=r"pass llm_id=None"):
+            make_toolkit(retrieve_handler(b""), llm_id="")
+
+    def test_the_answer_is_returned_with_the_hits(self):
+        tk = make_toolkit(
+            retrieve_handler(fixture("retrieve_llm_ok.ndjson")), llm_id=LLM
+        )
+        result = tk.goodmem_search("What is the fixture canary?")
+        assert "ORYX-2290" in result["abstractReply"]
+        assert result["partial"] is False and result["statuses"] == []
+        assert result["totalResults"] == 1
+
+    def test_an_llm_does_not_relabel_the_scores(self):
+        tk = make_toolkit(
+            retrieve_handler(fixture("retrieve_llm_ok.ndjson")), llm_id=LLM
+        )
+        hit = tk.goodmem_search("q")["results"][0]
+        assert hit["scoreKind"] == "vector"
+        assert hit["rawScore"] < 0
+        assert hit["score"] == pytest.approx(-hit["rawScore"])
+
+    def test_a_missing_llm_keeps_the_hits_and_reports_both_statuses(self):
+        tk = make_toolkit(
+            retrieve_handler(fixture("retrieve_llm_not_found.ndjson")),
+            llm_id=NO_SUCH_LLM,
+        )
+        result = tk.goodmem_search("q")
+        assert result["totalResults"] == 1, "hits were discarded"
+        assert result["partial"] is True
+        codes = [s["code"] for s in result["statuses"]]
+        assert codes == ["NOT_FOUND", "SUMMARIZATION_FAILED"]
+        assert "SUMMARIZATION_FAILED" in result["warning"]
+        assert result["abstractReply"] is None
+        assert result["results"][0]["scoreKind"] == "vector"
+
+    def test_a_failing_provider_keeps_the_hits_and_flags_them(self):
+        tk = make_toolkit(
+            retrieve_handler(fixture("retrieve_llm_rate_limited.ndjson")),
+            llm_id=LLM,
+        )
+        result = tk.goodmem_search("q")
+        assert result["totalResults"] == 1
+        assert result["partial"] is True
+        assert [s["code"] for s in result["statuses"]] == [
+            "SUMMARIZATION_FAILED"
+        ]
+        assert "429" in result["statuses"][0]["message"]
+        assert result["abstractReply"] is None
+
+    def test_a_missing_llm_does_not_undo_a_working_reranker(self):
+        r"""The LLM's NOT_FOUND names ``llm_id``, not the reranker, so the
+        hits keep their reranker scores."""
+        tk = make_toolkit(
+            retrieve_handler(
+                fixture("retrieve_reranked_llm_not_found.ndjson")
+            ),
+            reranker_id=RERANKER,
+            llm_id=NO_SUCH_LLM,
+        )
+        result = tk.goodmem_search("q")
+        hit = result["results"][0]
+        assert hit["scoreKind"] == "reranker"
+        assert hit["score"] == hit["rawScore"] > 0
+        assert result["partial"] is True
+
+    def test_the_model_still_sees_only_query_and_top_k(self):
+        tk = make_toolkit(retrieve_handler(b""), llm_id=LLM)
+        props = tk.get_tools()[0].get_openai_tool_schema()["function"][
+            "parameters"
+        ]["properties"]
+        assert set(props) == {"query", "top_k"}
+
+    def test_the_search_tool_returns_the_answer_to_the_model(self):
+        tk = make_toolkit(
+            retrieve_handler(fixture("retrieve_llm_ok.ndjson")), llm_id=LLM
+        )
+        tool = tk.get_tools()[0]
+        assert "ORYX-2290" in tool(query="canary", top_k=5)["abstractReply"]
+
+    def test_the_retriever_carries_the_answer_in_extra_info(self):
+        tk = make_toolkit(
+            retrieve_handler(fixture("retrieve_llm_ok.ndjson")), llm_id=LLM
+        )
+        rows = GoodMemRetriever(tk).query("What is the fixture canary?")
+        assert rows and all(
+            "ORYX-2290" in r["extra_info"]["goodmem_abstract_reply"]
+            for r in rows
+        )
+        assert float(rows[0]["similarity score"]) > 0
+
+    def test_the_retriever_reports_a_failed_llm_and_keeps_the_rows(self):
+        tk = make_toolkit(
+            retrieve_handler(fixture("retrieve_llm_not_found.ndjson")),
+            llm_id=NO_SUCH_LLM,
+        )
+        rows = GoodMemRetriever(tk).query("q")
+        assert len(rows) == 1 and "ORYX-2290" in rows[0]["text"]
+        extra = rows[0]["extra_info"]
+        assert extra["goodmem_partial"] is True
+        assert extra["goodmem_abstract_reply"] is None
+        codes = [s["code"] for s in extra["goodmem_statuses"]]
+        assert codes == ["NOT_FOUND", "SUMMARIZATION_FAILED"]
+
+    def test_the_retriever_adds_no_answer_key_without_an_llm(self):
+        tk = make_toolkit(retrieve_handler(fixture("retrieve_ok.ndjson")))
+        rows = GoodMemRetriever(tk).query("canary")
+        assert "goodmem_abstract_reply" not in rows[0]["extra_info"]
 
 
 # ---------------------------------------------------------------------------
