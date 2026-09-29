@@ -10,7 +10,16 @@ toolkit and as a `BaseRetriever`.
 > **Renamed on PyPI.** This package was previously published as
 > `camel-goodmem` (last version on that name: 0.3.0). Install `goodmem-camel`
 > from now on; the import name is unchanged — `import camel_goodmem` keeps
-> working. See [Changes in 0.3.1](#changes-in-031).
+> working. Both distributions ship the same `camel_goodmem` package, so
+> uninstall the old one first:
+>
+> ```bash
+> pip uninstall -y camel-goodmem && pip install goodmem-camel
+> ```
+>
+> With both installed they overwrite each other's files, and uninstalling
+> `camel-goodmem` afterwards deletes `camel_goodmem` while `goodmem-camel`
+> still shows as installed. See [Changes in 0.3.1](#changes-in-031).
 
 > **Upgrading from 0.1.0.** 0.1.0 talked to GoodMem over hand-written HTTP and
 > had defects that were invisible from its return values — a failed search
@@ -23,6 +32,9 @@ toolkit and as a `BaseRetriever`.
 ```bash
 pip install goodmem-camel
 ```
+
+Coming from `camel-goodmem`? Run `pip uninstall -y camel-goodmem` first (see
+the note above).
 
 Requires Python 3.10+, `camel-ai>=0.2.79`, `goodmem>=0.1.35`,
 `pydantic>=2.11` and `mcp<2`. CI installs exactly those floors and runs the
@@ -278,13 +290,16 @@ never closed by the toolkit.
 
 ## Changes in 0.3.1
 
-The distribution was renamed from `camel-goodmem` to `goodmem-camel`, because
-the package moved into the PAIR Systems organization on PyPI. The import
-package is still `camel_goodmem`; no code changes.
+The distribution was renamed from `camel-goodmem` to `goodmem-camel`: the
+package moved into the PAIR Systems PyPI organization under the
+`goodmem-<framework>` naming used by `goodmem-adk` and
+`goodmem-semantic-kernel`. The import package is still `camel_goodmem`; no
+code changes. Uninstall `camel-goodmem` before installing `goodmem-camel`.
 
 | Was (0.3.0) | Now |
 | --- | --- |
 | Published as `camel-goodmem`; `pip install goodmem-camel` found nothing (`ERROR: No matching distribution found for goodmem-camel`) | Published as `goodmem-camel`: the wheel is `goodmem_camel-0.3.1-py3-none-any.whl`, `METADATA` says `Name: goodmem-camel`, and `import camel_goodmem` still works. `camel-goodmem` stays at 0.3.0 |
+| Installing `goodmem-camel` next to `camel-goodmem` (same `camel_goodmem` files), then `pip uninstall camel-goodmem`, left `goodmem-camel 0.3.1` listed but `import camel_goodmem` raising `ModuleNotFoundError` | Documented: `pip uninstall -y camel-goodmem && pip install goodmem-camel`, after which `import camel_goodmem` gives `0.3.1` |
 
 ## Changes in 0.3.0
 
