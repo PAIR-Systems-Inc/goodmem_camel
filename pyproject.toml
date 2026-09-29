@@ -1,10 +1,10 @@
 [project]
-name = "camel-goodmem"
+name = "goodmem-camel"
 description = "GoodMem integration for CAMEL."
 authors = [{ name = "PAIR Systems" }]
 readme = "README.md"
 requires-python = ">=3.10"
-version = "0.3.0"
+version = "0.3.1"
 license-files = ["LICENSE"]
 urls.homepage = "https://github.com/PAIR-Systems-Inc/goodmem_camel"
 urls.source = "https://github.com/PAIR-Systems-Inc/goodmem_camel"
@@ -69,6 +69,12 @@ markers = [
 [build-system]
 requires = ["flit-core >= 3.11,<4.0"]
 build-backend = "flit_core.buildapi"
+
+# The distribution is `goodmem-camel`; the import package is still
+# `camel_goodmem`. flit otherwise derives the module from the distribution
+# name and fails with "No file/folder found for module goodmem_camel".
+[tool.flit.module]
+name = "camel_goodmem"
 
 [tool.ruff]
 line-length = 79

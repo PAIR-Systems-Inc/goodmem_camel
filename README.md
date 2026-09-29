@@ -1,11 +1,16 @@
-# camel-goodmem
+# goodmem-camel
 
 [GoodMem](https://docs.goodmem.ai) memory for [CAMEL](https://github.com/camel-ai/camel)
 agents. Documents are chunked, embedded and searched server-side; this package
 wraps the official `goodmem` Python SDK and exposes it to CAMEL both as a
 toolkit and as a `BaseRetriever`.
 
-**Version 0.3.0.** Verified against GoodMem server **v1.0.320**.
+**Version 0.3.1.** Verified against GoodMem server **v1.0.320**.
+
+> **Renamed on PyPI.** This package was previously published as
+> `camel-goodmem` (last version on that name: 0.3.0). Install `goodmem-camel`
+> from now on; the import name is unchanged — `import camel_goodmem` keeps
+> working. See [Changes in 0.3.1](#changes-in-031).
 
 > **Upgrading from 0.1.0.** 0.1.0 talked to GoodMem over hand-written HTTP and
 > had defects that were invisible from its return values — a failed search
@@ -16,7 +21,7 @@ toolkit and as a `BaseRetriever`.
 ## Install
 
 ```bash
-pip install camel-goodmem
+pip install goodmem-camel
 ```
 
 Requires Python 3.10+, `camel-ai>=0.2.79`, `goodmem>=0.1.35`,
@@ -270,6 +275,16 @@ toolkit = GoodMemToolkit(client=Goodmem(base_url=..., api_key=...))
 
 An injected client keeps its own server, credentials and TLS settings, and is
 never closed by the toolkit.
+
+## Changes in 0.3.1
+
+The distribution was renamed from `camel-goodmem` to `goodmem-camel`, because
+the package moved into the PAIR Systems organization on PyPI. The import
+package is still `camel_goodmem`; no code changes.
+
+| Was (0.3.0) | Now |
+| --- | --- |
+| Published as `camel-goodmem`; `pip install goodmem-camel` found nothing (`ERROR: No matching distribution found for goodmem-camel`) | Published as `goodmem-camel`: the wheel is `goodmem_camel-0.3.1-py3-none-any.whl`, `METADATA` says `Name: goodmem-camel`, and `import camel_goodmem` still works. `camel-goodmem` stays at 0.3.0 |
 
 ## Changes in 0.3.0
 

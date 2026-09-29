@@ -842,7 +842,7 @@ class TestSurfaceAndSafety:
 
 
 # ---------------------------------------------------------------------------
-# Regressions specific to camel-goodmem 0.1.0, the published package
+# Regressions specific to 0.1.0, published on PyPI as camel-goodmem
 # ---------------------------------------------------------------------------
 
 

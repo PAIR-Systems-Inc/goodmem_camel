@@ -20,7 +20,7 @@ from camel_goodmem._uploads import GoodMemUploadError
 from camel_goodmem.retriever import GoodMemRetriever
 from camel_goodmem.toolkit import GoodMemError, GoodMemToolkit
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 __all__ = [
     "GoodMemToolkit",
