@@ -15,14 +15,14 @@ import uuid
 
 import pytest
 
-from camel_goodmem import (
+from goodmem_camel import (
     GoodMemError,
     GoodMemIdError,
     GoodMemRetriever,
     GoodMemToolkit,
     filters,
 )
-from camel_goodmem._uploads import GoodMemUploadError
+from goodmem_camel._uploads import GoodMemUploadError
 
 API_KEY = os.environ.get("GOODMEM_API_KEY")
 BASE_URL = os.environ.get("GOODMEM_BASE_URL")

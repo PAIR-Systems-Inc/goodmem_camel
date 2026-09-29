@@ -4,7 +4,7 @@ from typing import Any
 from camel.logger import get_logger
 from camel.retrievers.base import BaseRetriever
 
-from camel_goodmem._filters import resolve_filter
+from goodmem_camel._filters import resolve_filter
 
 logger = get_logger(__name__)
 
@@ -23,13 +23,13 @@ class GoodMemRetriever(BaseRetriever):
 
     Args:
         toolkit (Any): A configured
-            :class:`~camel_goodmem.GoodMemToolkit`, which carries the
+            :class:`~goodmem_camel.GoodMemToolkit`, which carries the
             connection, the spaces, any reranker or LLM, and any metadata
             filter.
         metadata_filter (Optional[Union[Dict[str, Any], str]]): A filter
             every result must also match: a mapping (an ``AND`` of
             equalities) or an expression built with
-            :mod:`camel_goodmem.filters`, sent verbatim. It is combined with
+            :mod:`goodmem_camel.filters`, sent verbatim. It is combined with
             the toolkit's own ``metadata_filter`` by ``AND``, so it can narrow
             the toolkit's scope but never widen it. (default: :obj:`None`)
     """

@@ -25,13 +25,13 @@ from typing import Any
 
 import pytest
 
-from camel_goodmem import (
+from goodmem_camel import (
     UUID_PATTERN,
     GoodMemIdError,
     GoodMemRetriever,
     GoodMemToolkit,
 )
-from camel_goodmem._ids import require_uuid
+from goodmem_camel._ids import require_uuid
 from tests import test_goodmem_live as live
 
 FIXTURES = Path(__file__).parent / "goodmem_fixtures"
@@ -552,7 +552,7 @@ class TestRequireUuid:
             require_uuid(value, "space_id")
 
     def test_the_error_is_a_value_error_like_the_other_input_errors(self):
-        from camel_goodmem import GoodMemUploadError
+        from goodmem_camel import GoodMemUploadError
 
         assert issubclass(GoodMemIdError, ValueError)
         assert issubclass(GoodMemUploadError, ValueError)

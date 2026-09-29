@@ -5,10 +5,10 @@ the official ``goodmem`` SDK and exposes it to CAMEL both as a toolkit and as
 a :class:`~camel.retrievers.BaseRetriever`.
 """
 
-from camel_goodmem import filters
-from camel_goodmem._filters import GoodMemFilterError
-from camel_goodmem._ids import UUID_PATTERN, GoodMemIdError
-from camel_goodmem._results import (
+from goodmem_camel import filters
+from goodmem_camel._filters import GoodMemFilterError
+from goodmem_camel._ids import UUID_PATTERN, GoodMemIdError
+from goodmem_camel._results import (
     INFORMATIONAL_CODES,
     MALFORMED_STREAM_CODE,
     UNKNOWN_CODE,
@@ -16,11 +16,11 @@ from camel_goodmem._results import (
     RetrievalOutcome,
     RetrievalStatus,
 )
-from camel_goodmem._uploads import GoodMemUploadError
-from camel_goodmem.retriever import GoodMemRetriever
-from camel_goodmem.toolkit import GoodMemError, GoodMemToolkit
+from goodmem_camel._uploads import GoodMemUploadError
+from goodmem_camel.retriever import GoodMemRetriever
+from goodmem_camel.toolkit import GoodMemError, GoodMemToolkit
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
     "GoodMemToolkit",

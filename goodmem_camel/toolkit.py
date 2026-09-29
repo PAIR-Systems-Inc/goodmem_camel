@@ -8,8 +8,8 @@ from camel.toolkits.base import BaseToolkit
 from camel.toolkits.function_tool import FunctionTool
 from camel.utils import MCPServer, dependencies_required
 
-from camel_goodmem._filters import all_of, resolve_filter
-from camel_goodmem._results import (
+from goodmem_camel._filters import all_of, resolve_filter
+from goodmem_camel._results import (
     RetrievalOutcome,
     log_if_degraded,
     outcome_from_events,
@@ -129,7 +129,7 @@ class GoodMemToolkit(BaseToolkit):
         metadata_filter (Optional[Union[Dict[str, Any], str]]): A filter
             every retrieved memory must match, applied server-side. Either a
             mapping, which must match as an ``AND`` of equalities, or an
-            expression built with :mod:`camel_goodmem.filters` (``compare``,
+            expression built with :mod:`goodmem_camel.filters` (``compare``,
             ``one_of``, ``not_equals``, ``any_of`` ...), sent verbatim. Set by
             the developer; the model never supplies a filter.
             (default: :obj:`None`)
@@ -148,7 +148,7 @@ class GoodMemToolkit(BaseToolkit):
 
     Every id -- configured here or passed to a method -- must be a UUID. The
     SDK puts ids into request paths unescaped, so anything else is refused
-    with :class:`~camel_goodmem.GoodMemIdError` before a request is made.
+    with :class:`~goodmem_camel.GoodMemIdError` before a request is made.
     """
 
     @dependencies_required("goodmem")

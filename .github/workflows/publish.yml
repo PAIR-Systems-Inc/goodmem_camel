@@ -5,16 +5,17 @@ name: Publish to PyPI
 # (OpenID Connect). No API token is stored as a GitHub secret.
 #
 # One-time setup on PyPI:
-#   1. Create the project (or claim the name) on https://pypi.org.
-#   2. Open the project settings -> Publishing -> "Add a new pending publisher".
-#      Owner:       <your-github-org-or-user>
+#   1. On https://pypi.org (as a member of the `pairsysai` organization),
+#      open Publishing -> "Add a new pending publisher" for the project
+#      name `goodmem-camel`; the first release creates the project.
+#      Owner:       PAIR-Systems-Inc
 #      Repository:  goodmem_camel
 #      Workflow:    publish.yml
 #      Environment: pypi
 #
 # Release procedure:
 #   1. Bump `version = "..."` in pyproject.toml.
-#   2. Commit and tag, e.g. `git tag v0.1.0 && git push --tags`.
+#   2. Commit and tag, e.g. `git tag v0.3.1 && git push --tags`.
 #   3. This workflow runs the `publish` job against the GitHub environment
 #      `pypi` and uploads the freshly-built artifacts.
 
@@ -62,7 +63,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/project/camel-goodmem/
+      url: https://pypi.org/project/goodmem-camel/
     permissions:
       id-token: write
     steps:

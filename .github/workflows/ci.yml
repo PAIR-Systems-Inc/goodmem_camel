@@ -37,11 +37,11 @@ jobs:
       - name: Lint
         run: |
           set -euo pipefail
-          ruff check camel_goodmem tests
-          ruff format --check camel_goodmem tests
+          ruff check goodmem_camel tests
+          ruff format --check goodmem_camel tests
 
       - name: Types
-        run: mypy camel_goodmem
+        run: mypy goodmem_camel
 
       - name: Offline suite
         run: pytest tests/test_goodmem_toolkit.py tests/test_goodmem_ids.py -v
@@ -66,7 +66,7 @@ jobs:
           python -m build
           python -m venv /tmp/clean
           /tmp/clean/bin/pip install --quiet dist/*.whl
-          /tmp/clean/bin/python -c "import camel_goodmem; print(camel_goodmem.__version__)"
+          /tmp/clean/bin/python -c "import goodmem_camel; print(goodmem_camel.__version__)"
 
   # The declared lower bounds, installed as-is. `--resolution lowest-direct`
   # takes the floor of every direct dependency (camel-ai, goodmem, pydantic,
@@ -127,7 +127,7 @@ jobs:
       - name: Package imports at the floors
         run: |
           set -euo pipefail
-          /tmp/floor/bin/python -c "import camel_goodmem; print(camel_goodmem.__version__)"
+          /tmp/floor/bin/python -c "import goodmem_camel; print(goodmem_camel.__version__)"
 
       - name: Offline suite at the floors
         run: |
@@ -152,7 +152,7 @@ jobs:
       - name: TLS verification is not disabled in shipped Python
         run: |
           set -euo pipefail
-          if find camel_goodmem -name '*.py' \
+          if find goodmem_camel -name '*.py' \
                -exec grep -In "verify_ssl=False" {} + ; then
             echo "TLS verification is disabled in shipped Python."
             exit 1

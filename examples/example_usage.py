@@ -29,7 +29,7 @@ from camel.agents import ChatAgent
 from camel.models import ModelFactory
 from camel.types import ModelPlatformType, ModelType
 
-from camel_goodmem import GoodMemToolkit
+from goodmem_camel import GoodMemToolkit
 
 verify_ssl = os.environ.get("GOODMEM_VERIFY_SSL", "true").lower() != "false"
 
@@ -37,9 +37,9 @@ verify_ssl = os.environ.get("GOODMEM_VERIFY_SSL", "true").lower() != "false"
 admin = GoodMemToolkit(verify_ssl=verify_ssl, allow_admin_tools=True, allow_delete=True)
 embedder_id = os.environ.get("GOODMEM_EMBEDDER_ID") or admin.list_embedders()[0]["embedderId"]
 
-space_id = admin.create_space("camel-goodmem-example", embedder_id)["spaceId"]
-team_space_id = admin.create_space("camel-goodmem-example-team", embedder_id)["spaceId"]
-tagged_space_id = admin.create_space("camel-goodmem-example-tagged", embedder_id)["spaceId"]
+space_id = admin.create_space("goodmem-camel-example", embedder_id)["spaceId"]
+team_space_id = admin.create_space("goodmem-camel-example-team", embedder_id)["spaceId"]
+tagged_space_id = admin.create_space("goodmem-camel-example-tagged", embedder_id)["spaceId"]
 created = [space_id, team_space_id, tagged_space_id]
 
 model = ModelFactory.create(

@@ -1,11 +1,11 @@
-# camel-goodmem
+# goodmem-camel
 
 [GoodMem](https://docs.goodmem.ai) memory for [CAMEL](https://github.com/camel-ai/camel)
 agents. Documents are chunked, embedded and searched server-side; this package
 wraps the official `goodmem` Python SDK and exposes it to CAMEL both as a
 toolkit and as a `BaseRetriever`.
 
-**Version 0.3.0.** Verified against GoodMem server **v1.0.320**.
+**Version 0.4.0.** Verified against GoodMem server **v1.0.320**.
 
 > **Upgrading from 0.1.0.** 0.1.0 talked to GoodMem over hand-written HTTP and
 > had defects that were invisible from its return values — a failed search
@@ -16,7 +16,7 @@ toolkit and as a `BaseRetriever`.
 ## Install
 
 ```bash
-pip install camel-goodmem
+pip install goodmem-camel
 ```
 
 Requires Python 3.10+, `camel-ai>=0.2.79`, `goodmem>=0.1.35`,
@@ -32,7 +32,7 @@ export GOODMEM_BASE_URL="https://your-goodmem-server"
 
 ```python
 from camel.agents import ChatAgent
-from camel_goodmem import GoodMemToolkit
+from goodmem_camel import GoodMemToolkit
 
 toolkit = GoodMemToolkit(space_ids=["<space-uuid>"])
 agent = ChatAgent("You remember things.", tools=toolkit.get_tools())
@@ -138,7 +138,7 @@ when you construct the toolkit. The model never sees or chooses it —
 `goodmem_search` still takes only `query` and `top_k`.
 
 ```python
-from camel_goodmem import GoodMemRetriever, GoodMemToolkit
+from goodmem_camel import GoodMemRetriever, GoodMemToolkit
 
 toolkit = GoodMemToolkit(space_ids=["<space-uuid>"], llm_id="<llm-uuid>")
 
@@ -193,7 +193,7 @@ own scope and broke on any value containing an apostrophe.
   `compare`, `one_of`, combined with `all_of` / `any_of` — sent verbatim.
 
 ```python
-from camel_goodmem import GoodMemRetriever, GoodMemToolkit, filters
+from goodmem_camel import GoodMemRetriever, GoodMemToolkit, filters
 
 # dict: tenant == "acme" AND active == true
 toolkit = GoodMemToolkit(
@@ -235,7 +235,7 @@ resolved — symlinks included — and refused if it lands outside that director
 so a model-supplied path cannot read arbitrary files from the host.
 
 ```python
-from camel_goodmem import GoodMemToolkit
+from goodmem_camel import GoodMemToolkit
 
 toolkit = GoodMemToolkit(
     space_ids=["<space-uuid>"], upload_dir="/srv/agent-uploads"
@@ -245,7 +245,7 @@ toolkit = GoodMemToolkit(
 ## Retriever
 
 ```python
-from camel_goodmem import GoodMemRetriever, GoodMemToolkit
+from goodmem_camel import GoodMemRetriever, GoodMemToolkit
 
 retriever = GoodMemRetriever(GoodMemToolkit(space_ids=["<space-uuid>"]))
 retriever.process("Text to remember.")
@@ -263,13 +263,20 @@ toolkit has an `llm_id`).
 
 ```python
 from goodmem import Goodmem
-from camel_goodmem import GoodMemToolkit
+from goodmem_camel import GoodMemToolkit
 
 toolkit = GoodMemToolkit(client=Goodmem(base_url=..., api_key=...))
 ```
 
 An injected client keeps its own server, credentials and TLS settings, and is
 never closed by the toolkit.
+
+## Changes in 0.4.0
+
+Renamed to `goodmem-camel` (import `goodmem_camel`), the
+`goodmem-<framework>` naming used by `goodmem-adk` and
+`goodmem-semantic-kernel`. Breaking: update imports from `camel_goodmem` to
+`goodmem_camel`. No other code changes.
 
 ## Changes in 0.3.0
 
@@ -343,9 +350,9 @@ GOODMEM_API_KEY=... GOODMEM_BASE_URL=... \
   pytest tests/test_goodmem_live.py
 
 # what CI runs
-ruff check camel_goodmem tests
-ruff format --check camel_goodmem tests
-mypy camel_goodmem
+ruff check goodmem_camel tests
+ruff format --check goodmem_camel tests
+mypy goodmem_camel
 
 # ...and the declared floors, on Python 3.10
 uv venv --python 3.10 floor

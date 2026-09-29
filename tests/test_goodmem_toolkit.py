@@ -14,21 +14,21 @@ from pathlib import Path
 import httpx
 import pytest
 
-from camel_goodmem import (
+from goodmem_camel import (
     GoodMemError,
     GoodMemRetriever,
     GoodMemToolkit,
     filters,
 )
-from camel_goodmem._filters import GoodMemFilterError
-from camel_goodmem._results import (
+from goodmem_camel._filters import GoodMemFilterError
+from goodmem_camel._results import (
     MALFORMED_STREAM_CODE,
     UNKNOWN_CODE,
     classify_status,
     orient_score,
     outcome_from_events,
 )
-from camel_goodmem._uploads import (
+from goodmem_camel._uploads import (
     GoodMemUploadError,
     resolve_upload_path,
 )
@@ -842,7 +842,7 @@ class TestSurfaceAndSafety:
 
 
 # ---------------------------------------------------------------------------
-# Regressions specific to camel-goodmem 0.1.0, the published package
+# Regressions specific to 0.1.0, the first published release
 # ---------------------------------------------------------------------------
 
 
@@ -861,10 +861,10 @@ class TestPublishedPackageRegressions:
         import ast
         from pathlib import Path as _Path
 
-        import camel_goodmem
+        import goodmem_camel
 
         offenders = []
-        for path in _Path(camel_goodmem.__file__).parent.glob("*.py"):
+        for path in _Path(goodmem_camel.__file__).parent.glob("*.py"):
             tree = ast.parse(path.read_text())
             # drop every docstring, then look at what is left
             for node in ast.walk(tree):
@@ -1023,7 +1023,7 @@ class TestLlmPostProcessing:
         assert "abstractReply" not in result
 
     def test_a_malformed_llm_id_is_refused_before_any_request(self):
-        from camel_goodmem import GoodMemIdError
+        from goodmem_camel import GoodMemIdError
 
         sent = []
 
@@ -1041,7 +1041,7 @@ class TestLlmPostProcessing:
         assert sent == []
 
     def test_an_empty_llm_id_says_how_to_turn_it_off(self):
-        from camel_goodmem import GoodMemIdError
+        from goodmem_camel import GoodMemIdError
 
         with pytest.raises(GoodMemIdError, match=r"pass llm_id=None"):
             make_toolkit(retrieve_handler(b""), llm_id="")
