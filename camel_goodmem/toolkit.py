@@ -31,6 +31,13 @@ _NO_RERANKER_HINT = (
     "an empty string is refused rather than read as 'no reranker'."
 )
 
+#: The same refusal for ``llm_id``, so ``llm_id=os.getenv("X", "")`` fails at
+#: startup rather than being sent as an id.
+_NO_LLM_HINT = (
+    "To search without an LLM, pass llm_id=None or leave it out; "
+    "an empty string is refused rather than read as 'no LLM'."
+)
+
 
 class GoodMemError(RuntimeError):
     r"""Raised when a GoodMem operation fails.
@@ -81,8 +88,8 @@ class GoodMemToolkit(BaseToolkit):
     embedded and searched server-side. This toolkit wraps the official
     ``goodmem`` Python SDK and exposes a deliberately narrow set of tools to
     the model -- a search and, optionally, a write -- while every operational
-    setting (which spaces, which reranker, whether uploads are possible) is
-    fixed by the developer at construction time.
+    setting (which spaces, which reranker, which LLM, whether uploads are
+    possible) is fixed by the developer at construction time.
 
     Args:
         base_url (Optional[str]): The base URL of the GoodMem server. Falls
@@ -104,6 +111,16 @@ class GoodMemToolkit(BaseToolkit):
         reranker_id (Optional[str]): The UUID of a reranker to apply to
             retrieval. Without one, no relevance threshold is applied. Pass
             ``None`` for no reranker: an empty string is a malformed id and
+            is refused. (default: :obj:`None`)
+        llm_id (Optional[str]): The UUID of a GoodMem LLM to run over the
+            retrieved chunks. Its grounded answer is returned as
+            ``abstractReply`` by ``goodmem_search`` and as
+            ``goodmem_abstract_reply`` in the retriever's ``extra_info``.
+            Scores are unaffected: an LLM does not rerank. When the LLM
+            fails, the server reports ``SUMMARIZATION_FAILED`` (and
+            ``NOT_FOUND`` for an LLM that does not exist); the hits are still
+            returned, ``partial`` is set and ``abstractReply`` is ``None``.
+            Pass ``None`` for no LLM: an empty string is a malformed id and
             is refused. (default: :obj:`None`)
         min_score (Optional[float]): Drop hits scoring below this value.
             Applies only to reranker scores: not without ``reranker_id``, and
@@ -145,6 +162,7 @@ class GoodMemToolkit(BaseToolkit):
         timeout: float | None = 30.0,
         upload_dir: str | Path | None = None,
         reranker_id: str | None = None,
+        llm_id: str | None = None,
         min_score: float | None = None,
         metadata_filter: dict[str, Any] | str | None = None,
         allow_write: bool = True,
@@ -173,6 +191,11 @@ class GoodMemToolkit(BaseToolkit):
         self.reranker_id = (
             require_uuid(reranker_id, "reranker_id", hint=_NO_RERANKER_HINT)
             if reranker_id is not None
+            else None
+        )
+        self.llm_id = (
+            require_uuid(llm_id, "llm_id", hint=_NO_LLM_HINT)
+            if llm_id is not None
             else None
         )
         self.min_score = min_score
@@ -281,6 +304,12 @@ class GoodMemToolkit(BaseToolkit):
             self.reranker_id, "reranker_id", hint=_NO_RERANKER_HINT
         )
 
+    def _require_llm(self) -> str | None:
+        r"""Returns the configured LLM as a canonical UUID, if any."""
+        if self.llm_id is None:
+            return None
+        return require_uuid(self.llm_id, "llm_id", hint=_NO_LLM_HINT)
+
     def _space_keys(self, narrow: str = "") -> list[dict[str, Any]]:
         r"""Builds the ``spaceKeys`` payload, including any metadata filter.
 
@@ -309,9 +338,11 @@ class GoodMemToolkit(BaseToolkit):
                 toolkit's own. (default: ``""``)
 
         Returns:
-            RetrievalOutcome: The hits and any statuses the server reported.
+            RetrievalOutcome: The hits, any statuses the server reported, and
+                the LLM's answer when one was configured and produced.
         """
         reranker_id = self._require_reranker()
+        llm_id = self._require_llm()
         kwargs: dict[str, Any] = {
             "message": query,
             "space_keys": self._space_keys(narrow),
@@ -320,6 +351,10 @@ class GoodMemToolkit(BaseToolkit):
         }
         if reranker_id:
             kwargs["reranker_id"] = reranker_id
+        if llm_id:
+            # The SDK puts it in the post-processor config beside
+            # ``reranker_id``. It does not change the hits or their scores.
+            kwargs["llm_id"] = llm_id
 
         try:
             stream = self._client.memories.retrieve(**kwargs)
@@ -377,7 +412,9 @@ class GoodMemToolkit(BaseToolkit):
                 chunks, each with its text and the metadata of the memory it
                 came from), ``partial`` (``True`` when the server reported a
                 problem during this search), ``statuses`` (what the server
-                reported), and ``query``.
+                reported), and ``query``. When the developer configured an
+                LLM, ``abstractReply`` holds its answer drawn from the
+                results, or ``None`` if it failed (see ``statuses``).
         """
         outcome = self._retrieve(query, top_k)
         result: dict[str, Any] = {
@@ -394,7 +431,10 @@ class GoodMemToolkit(BaseToolkit):
             # an empty result carries the reason rather than reading as a
             # clean miss.
             result["warning"] = outcome.warning_text()
-        if outcome.abstract_reply:
+        if outcome.abstract_reply is not None or self.llm_id is not None:
+            # Present whenever an LLM was asked for, so a failed one reads as
+            # None beside its SUMMARIZATION_FAILED status, not as a missing
+            # key.
             result["abstractReply"] = outcome.abstract_reply
         return result
 

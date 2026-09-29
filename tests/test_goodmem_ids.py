@@ -44,6 +44,7 @@ HOME = "01a0d44b-746f-775b-b91e-bc73d4058e27"
 MEMORY = "01a0d44b-748d-72eb-b54e-c3ea2d956927"
 EMBEDDER = "019cfd1c-c033-7517-b7de-f73941a0464b"
 RERANKER = "019cfd1d-5b7e-7a41-9c3d-2f0e8a6b4c11"
+LLM = "019cfd9f-0963-76f9-b069-4cde19a64ba8"
 
 #: Every payload is refused. The first five are traversals, the rest are
 #: near-misses a lenient check lets through: a leading space, a query or
@@ -283,6 +284,10 @@ USES_CONFIGURED_RERANKER: dict[str, Callable[[GoodMemToolkit], Any]] = {
     "retriever.query": lambda tk: GoodMemRetriever(tk).query("q"),
 }
 
+#: ``llm_id`` goes in the retrieval body, beside ``reranker_id``, and is
+#: checked by the same validator.
+USES_CONFIGURED_LLM = USES_CONFIGURED_RERANKER
+
 
 @pytest.mark.parametrize("payload", PAYLOADS.values(), ids=PAYLOADS.keys())
 @pytest.mark.parametrize("entry", DIRECT.keys())
@@ -349,6 +354,17 @@ def test_a_malformed_configured_reranker_is_refused_at_construction(
 
 
 @pytest.mark.parametrize("payload", PAYLOADS.values(), ids=PAYLOADS.keys())
+def test_a_malformed_configured_llm_is_refused_at_construction(
+    server, payload
+):
+    _assert_refused(
+        server,
+        lambda: _toolkit(server, llm_id=payload).goodmem_search("q"),
+        "llm_id",
+    )
+
+
+@pytest.mark.parametrize("payload", PAYLOADS.values(), ids=PAYLOADS.keys())
 @pytest.mark.parametrize("entry", USES_CONFIGURED_SPACE.keys())
 def test_a_space_id_set_after_construction_is_refused_at_the_call(
     server, tmp_path, entry, payload
@@ -374,6 +390,16 @@ def test_a_reranker_id_set_after_construction_is_refused_at_the_call(
     _assert_refused(
         server, lambda: USES_CONFIGURED_RERANKER[entry](tk), "reranker_id"
     )
+
+
+@pytest.mark.parametrize("payload", PAYLOADS.values(), ids=PAYLOADS.keys())
+@pytest.mark.parametrize("entry", USES_CONFIGURED_LLM.keys())
+def test_an_llm_id_set_after_construction_is_refused_at_the_call(
+    server, entry, payload
+):
+    tk = _toolkit(server)
+    tk.llm_id = payload
+    _assert_refused(server, lambda: USES_CONFIGURED_LLM[entry](tk), "llm_id")
 
 
 # ---------------------------------------------------------------------------
@@ -464,6 +490,14 @@ def test_body_ids_are_sent_canonical(server):
     assert create["method"] == "POST" and create["target"] == "/v1/spaces"
     embedders = json.loads(create["body"])["spaceEmbedders"]
     assert [e["embedderId"] for e in embedders] == [EMBEDDER]
+
+
+def test_the_llm_id_is_sent_canonical_in_the_post_processor(server):
+    _toolkit(server, llm_id=LLM.upper()).goodmem_search("q")
+    (retrieve,) = server.log
+    body = json.loads(retrieve["body"])
+    assert body["postProcessor"]["config"]["llm_id"] == LLM
+    assert LLM.upper() not in json.dumps(body)
 
 
 # ---------------------------------------------------------------------------
@@ -674,6 +708,27 @@ def test_no_reranker_is_none_not_an_empty_string(server):
     assert "rerankerId" not in json.dumps(json.loads(retrieve["body"]))
 
 
+def test_an_empty_llm_id_is_refused_saying_how_to_turn_it_off(server):
+    _assert_refused(server, lambda: _toolkit(server, llm_id=""), "llm_id")
+    with pytest.raises(GoodMemIdError, match=r"pass llm_id=None"):
+        _toolkit(server, llm_id="")
+
+
+def test_an_empty_llm_id_set_later_says_how_to_turn_it_off(server):
+    tk = _toolkit(server)
+    tk.llm_id = ""
+    with pytest.raises(GoodMemIdError, match=r"pass llm_id=None"):
+        tk.goodmem_search("q")
+    assert _sent(server) == []
+
+
+def test_no_llm_is_none_and_sends_no_post_processor(server):
+    _toolkit(server, llm_id=None).goodmem_search("q")
+    (retrieve,) = server.log
+    body = json.loads(retrieve["body"])
+    assert "postProcessor" not in body and "llm_id" not in json.dumps(body)
+
+
 def test_the_readme_calls_out_that_an_empty_reranker_id_is_refused():
     readme = (Path(__file__).parents[1] / "README.md").read_text("utf-8")
     changes = readme.split("## Changes in 0.2.1", 1)[1].split("\n## ", 1)[0]
@@ -718,7 +773,14 @@ _ID_POSITION = {
     "delete_memory": 0,
     "create_space": 1,
 }
-_ID_NAMES = {"memory_id", "space_id", "embedder_id", "reranker_id", "id"}
+_ID_NAMES = {
+    "memory_id",
+    "space_id",
+    "embedder_id",
+    "reranker_id",
+    "llm_id",
+    "id",
+}
 _ID_LISTS = {"space_ids"}
 
 
@@ -810,6 +872,8 @@ def test_no_live_test_expects_the_server_to_see_a_malformed_id():
         ("GoodMemToolkit(space_ids=['space-1'])\n", ["line 1: 'space-1'"]),
         ("GoodMemToolkit(reranker_id='')\n", ["line 1: ''"]),
         ("tk.reranker_id = 'rr-1'\n", ["line 1: 'rr-1'"]),
+        ("GoodMemToolkit(llm_id='qwen3-8b')\n", ["line 1: 'qwen3-8b'"]),
+        ("tk.llm_id = ''\n", ["line 1: ''"]),
         # Expected to be refused client-side: fine.
         (
             "with pytest.raises(GoodMemIdError):\n"

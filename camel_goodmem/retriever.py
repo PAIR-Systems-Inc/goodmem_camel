@@ -24,7 +24,8 @@ class GoodMemRetriever(BaseRetriever):
     Args:
         toolkit (Any): A configured
             :class:`~camel_goodmem.GoodMemToolkit`, which carries the
-            connection, the spaces and any metadata filter.
+            connection, the spaces, any reranker or LLM, and any metadata
+            filter.
         metadata_filter (Optional[Union[Dict[str, Any], str]]): A filter
             every result must also match: a mapping (an ``AND`` of
             equalities) or an expression built with
@@ -91,7 +92,10 @@ class GoodMemRetriever(BaseRetriever):
                 ``similarity score``, ``content path``, ``metadata``,
                 ``extra_info`` and ``text``. When the retrieval was degraded
                 and nothing usable came back, a single dictionary is returned
-                whose ``text`` states what the server reported.
+                whose ``text`` states what the server reported. When the
+                toolkit has an ``llm_id``, every row's ``extra_info`` carries
+                ``goodmem_abstract_reply``: the LLM's answer, or ``None`` if
+                it failed.
         """
         outcome = self.toolkit._retrieve(
             query, top_k, narrow=resolve_filter(self.metadata_filter)
@@ -117,6 +121,16 @@ class GoodMemRetriever(BaseRetriever):
                 )
             hits = kept
 
+        # One answer per retrieval, so it rides on every row: a CAMEL caller
+        # that keeps only the first row, or only rows above a threshold,
+        # still has it.
+        summary: dict[str, Any] = {}
+        if (
+            outcome.abstract_reply is not None
+            or getattr(self.toolkit, "llm_id", None) is not None
+        ):
+            summary["goodmem_abstract_reply"] = outcome.abstract_reply
+
         results: list[dict[str, Any]] = []
         for hit in hits:
             extra: dict[str, Any] = {
@@ -126,6 +140,7 @@ class GoodMemRetriever(BaseRetriever):
                 "goodmem_score_kind": hit.score_kind,
                 "goodmem_raw_score": hit.raw_score,
                 "goodmem_partial": outcome.partial,
+                **summary,
             }
             if outcome.partial:
                 extra["goodmem_statuses"] = outcome.status_dicts
@@ -159,6 +174,7 @@ class GoodMemRetriever(BaseRetriever):
                         "extra_info": {
                             "goodmem_partial": True,
                             "goodmem_statuses": outcome.status_dicts,
+                            **summary,
                         },
                     }
                 ]
@@ -168,7 +184,7 @@ class GoodMemRetriever(BaseRetriever):
                         f"No information relevant to {query!r} is stored in "
                         "the configured GoodMem space(s)."
                     ),
-                    "extra_info": {"goodmem_partial": False},
+                    "extra_info": {"goodmem_partial": False, **summary},
                 }
             ]
         return results

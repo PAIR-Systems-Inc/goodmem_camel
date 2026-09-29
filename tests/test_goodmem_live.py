@@ -39,6 +39,17 @@ RUN = uuid.uuid4().hex[:8]
 #: that is not a UUID before a request is made, so a test that needs the
 #: *server* to reject an id has to send one that passes that check.
 NO_SUCH_EMBEDDER = "00000000-0000-7000-8000-000000000000"
+#: The same for an LLM: well-formed, so it reaches the server, which answers
+#: NOT_FOUND and SUMMARIZATION_FAILED in the stream.
+NO_SUCH_LLM = "00000000-0000-7000-8000-000000000000"
+
+#: A working GoodMem LLM, for the LLM tests; they skip without one.
+LLM_ID = os.environ.get("GOODMEM_TEST_LLM_ID")
+#: Optional: an LLM whose provider fails (e.g. out of credits), to see a
+#: real provider failure rather than a missing id.
+FAILING_LLM_ID = os.environ.get("GOODMEM_TEST_FAILING_LLM_ID")
+#: Optional: a working reranker, to check an LLM failure leaves its scores.
+RERANKER_ID = os.environ.get("GOODMEM_TEST_RERANKER_ID")
 
 
 def _embedder_id(toolkit: GoodMemToolkit) -> str:
@@ -242,6 +253,83 @@ class TestLiveStatusContract:
             admin._client.spaces.delete(id=empty["spaceId"])
         assert result["totalResults"] == 0
         assert elapsed < 3.0, f"an empty search took {elapsed:.1f}s"
+
+
+class TestLiveLlm:
+    r"""``llm_id`` is developer-set; the model's tool is unchanged."""
+
+    def _search(self, space, seeded, **options):
+        toolkit = GoodMemToolkit(
+            space_ids=[space], verify_ssl=VERIFY_SSL, **options
+        )
+        try:
+            names = {t.get_function_name(): t for t in toolkit.get_tools()}
+            props = names["goodmem_search"].get_openai_tool_schema()[
+                "function"
+            ]["parameters"]["properties"]
+            assert set(props) == {"query", "top_k"}
+            return toolkit.goodmem_search(
+                f"What is the CAMEL live-test canary? {seeded[0]}", top_k=3
+            )
+        finally:
+            toolkit.close()
+
+    def test_the_llm_answer_comes_back_with_the_hits(self, space, seeded):
+        if not LLM_ID:
+            pytest.skip("GOODMEM_TEST_LLM_ID is not set")
+        result = self._search(space, seeded, llm_id=LLM_ID)
+        assert result["partial"] is False, result["statuses"]
+        assert result["abstractReply"], "no answer came back"
+        assert seeded[0] in result["abstractReply"]
+        hit = result["results"][0]
+        assert hit["memoryId"] == seeded[1]
+        # An LLM does not rerank: the scores are still vector scores.
+        assert hit["scoreKind"] == "vector" and hit["rawScore"] < 0
+
+    def test_the_retriever_carries_the_llm_answer(self, space, seeded):
+        if not LLM_ID:
+            pytest.skip("GOODMEM_TEST_LLM_ID is not set")
+        toolkit = GoodMemToolkit(
+            space_ids=[space], verify_ssl=VERIFY_SSL, llm_id=LLM_ID
+        )
+        try:
+            rows = GoodMemRetriever(toolkit).query(seeded[0], top_k=3)
+        finally:
+            toolkit.close()
+        extra = rows[0]["extra_info"]
+        assert extra["goodmem_partial"] is False
+        assert seeded[0] in extra["goodmem_abstract_reply"]
+
+    def test_a_missing_llm_keeps_the_hits_and_flags_them(self, space, seeded):
+        result = self._search(space, seeded, llm_id=NO_SUCH_LLM)
+        assert result["totalResults"] > 0, "hits were discarded"
+        assert result["partial"] is True
+        codes = {s["code"] for s in result["statuses"]}
+        assert {"NOT_FOUND", "SUMMARIZATION_FAILED"} <= codes
+        assert result["abstractReply"] is None
+        assert result["warning"]
+
+    def test_a_failing_provider_keeps_the_hits_and_flags_them(
+        self, space, seeded
+    ):
+        if not FAILING_LLM_ID:
+            pytest.skip("GOODMEM_TEST_FAILING_LLM_ID is not set")
+        result = self._search(space, seeded, llm_id=FAILING_LLM_ID)
+        assert result["totalResults"] > 0
+        assert result["partial"] is True
+        codes = [s["code"] for s in result["statuses"]]
+        assert "SUMMARIZATION_FAILED" in codes
+        assert result["abstractReply"] is None
+
+    def test_a_missing_llm_leaves_reranker_scores_alone(self, space, seeded):
+        if not RERANKER_ID:
+            pytest.skip("GOODMEM_TEST_RERANKER_ID is not set")
+        result = self._search(
+            space, seeded, reranker_id=RERANKER_ID, llm_id=NO_SUCH_LLM
+        )
+        assert result["totalResults"] > 0 and result["partial"] is True
+        assert all(h["scoreKind"] == "reranker" for h in result["results"])
+        assert all(h["score"] == h["rawScore"] for h in result["results"])
 
 
 class TestLiveFilters:
